@@ -1,0 +1,524 @@
+import time
+import datetime
+import random
+import threading
+import queue
+from typing import Optional, Dict, List
+from collections import deque
+
+class DroneHeartbeatSimulator:
+    """无人机心跳包模拟器"""
+    
+    def __init__(self, drone_id: str = "DRONE-001"):
+        """
+        初始化无人机心跳模拟器
+        
+        Args:
+            drone_id: 无人机ID
+        """
+        self.drone_id = drone_id
+        self.sequence_number = 0
+        self.is_running = False
+        self.heartbeat_queue = queue.Queue()
+        self.simulation_thread: Optional[threading.Thread] = None
+        self.simulate_connection_issue = False  # 模拟连接问题
+        
+    def generate_heartbeat(self) -> dict:
+        """
+        生成心跳包数据
+        
+        Returns:
+            包含心跳信息的字典
+        """
+        current_time = datetime.datetime.now()
+        
+        heartbeat = {
+            'drone_id': self.drone_id,
+            'sequence': self.sequence_number,
+            'timestamp': current_time.isoformat(),
+            'timestamp_epoch': int(current_time.timestamp() * 1000),  # 毫秒级时间戳
+            'status': random.choice(['normal', 'normal', 'normal', 'warning', 'normal']),
+            'battery': round(random.uniform(65, 100), 1),  # 电池电量百分比
+            'altitude': round(random.uniform(50, 150), 1),  # 高度（米）
+            'speed': round(random.uniform(0, 20), 1),  # 速度（米/秒）
+            'signal_quality': random.randint(70, 100),  # 信号质量百分比
+            'gps_satellites': random.randint(6, 12),  # GPS卫星数量
+            'temperature': round(random.uniform(20, 45), 1),  # 温度（摄氏度）
+        }
+        
+        return heartbeat
+    
+    def send_heartbeat(self) -> None:
+        """
+        发送心跳包（模拟）
+        """
+        try:
+            # 模拟连接问题（随机丢包）
+            if self.simulate_connection_issue and random.random() < 0.3:  # 30%的丢包率
+                print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
+                      f"⚠️  心跳包 #{self.sequence_number:04d} 发送失败（模拟丢包）")
+                self.sequence_number += 1
+                return
+            
+            heartbeat = self.generate_heartbeat()
+            self.heartbeat_queue.put(heartbeat)
+            
+            # 打印心跳包信息
+            print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
+                  f"📤 心跳包 #{self.sequence_number:04d} | "
+                  f"电量: {heartbeat['battery']}% | "
+                  f"高度: {heartbeat['altitude']}m | "
+                  f"速度: {heartbeat['speed']}m/s | "
+                  f"信号: {heartbeat['signal_quality']}%")
+            
+            self.sequence_number += 1
+            
+        except Exception as e:
+            print(f"发送心跳包时出错: {e}")
+    
+    def simulate_heartbeat_loop(self):
+        """
+        心跳模拟主循环
+        """
+        while self.is_running:
+            self.send_heartbeat()
+            time.sleep(1)  # 每秒发送一次
+            
+    def start(self):
+        """
+        启动心跳模拟
+        """
+        if not self.is_running:
+            self.is_running = True
+            self.sequence_number = 0
+            self.simulation_thread = threading.Thread(target=self.simulate_heartbeat_loop)
+            self.simulation_thread.daemon = True
+            self.simulation_thread.start()
+            print(f"🚁 无人机 {self.drone_id} 心跳模拟已启动")
+            print("-" * 80)
+    
+    def stop(self):
+        """
+        停止心跳模拟
+        """
+        if self.is_running:
+            self.is_running = False
+            if self.simulation_thread:
+                self.simulation_thread.join(timeout=2)
+            print(f"\n🚁 无人机 {self.drone_id} 心跳模拟已停止")
+            print(f"📊 总共发送了 {self.sequence_number} 个心跳包")
+            print("-" * 80)
+    
+    def get_latest_heartbeat(self) -> Optional[dict]:
+        """
+        获取最新的心跳包
+        
+        Returns:
+            最新的心跳包数据，如果没有则返回None
+        """
+        try:
+            return self.heartbeat_queue.get_nowait()
+        except queue.Empty:
+            return None
+    
+    def toggle_connection_issue(self):
+        """切换连接问题模拟状态"""
+        self.simulate_connection_issue = not self.simulate_connection_issue
+        status = "开启" if self.simulate_connection_issue else "关闭"
+        print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
+              f"🔧 连接问题模拟已{status}")
+
+
+class GroundStation:
+    """地面站 - 带连接超时报警功能"""
+    
+    # 报警状态
+    ALARM_NONE = 0      # 正常
+    ALARM_WARNING = 1   # 警告
+    ALARM_CRITICAL = 2  # 严重
+    
+    def __init__(self, station_id: str = "GROUND-STATION-001", timeout_seconds: int = 3):
+        """
+        初始化地面站
+        
+        Args:
+            station_id: 地面站ID
+            timeout_seconds: 超时阈值（秒）
+        """
+        self.station_id = station_id
+        self.timeout_threshold = timeout_seconds
+        self.is_running = False
+        self.monitor_thread: Optional[threading.Thread] = None
+        self.alarm_thread: Optional[threading.Thread] = None
+        
+        # 存储接收到的心跳包
+        self.received_heartbeats: Dict[str, deque] = {}  # 每个无人机维护一个队列
+        
+        # 最后接收时间
+        self.last_heartbeat_time: Dict[str, float] = {}
+        
+        # 报警状态
+        self.alarm_status: Dict[str, int] = {}
+        
+        # 报警历史
+        self.alarm_history: List[dict] = []
+        
+        # 线程锁
+        self.lock = threading.Lock()
+        
+    def register_drone(self, drone_id: str):
+        """
+        注册无人机到地面站
+        
+        Args:
+            drone_id: 无人机ID
+        """
+        with self.lock:
+            if drone_id not in self.received_heartbeats:
+                self.received_heartbeats[drone_id] = deque(maxlen=100)  # 保留最近100个心跳
+                self.last_heartbeat_time[drone_id] = time.time()
+                self.alarm_status[drone_id] = self.ALARM_NONE
+                print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
+                      f"📡 无人机 {drone_id} 已注册到地面站 {self.station_id}")
+    
+    def process_heartbeat(self, heartbeat: dict):
+        """
+        处理接收到的的心跳包
+        
+        Args:
+            heartbeat: 心跳包数据
+        """
+        drone_id = heartbeat['drone_id']
+        current_time = time.time()
+        
+        with self.lock:
+            # 如果无人机未注册，自动注册
+            if drone_id not in self.received_heartbeats:
+                self.register_drone(drone_id)
+            
+            # 保存心跳包
+            self.received_heartbeats[drone_id].append({
+                'heartbeat': heartbeat,
+                'receive_time': current_time
+            })
+            
+            # 更新最后接收时间
+            self.last_heartbeat_time[drone_id] = current_time
+            
+            # 如果有报警，清除报警状态
+            if self.alarm_status[drone_id] != self.ALARM_NONE:
+                old_status = self.alarm_status[drone_id]
+                self.alarm_status[drone_id] = self.ALARM_NONE
+                
+                # 记录报警恢复
+                alarm_record = {
+                    'drone_id': drone_id,
+                    'type': 'recovery',
+                    'timestamp': datetime.datetime.now().isoformat(),
+                    'message': f'无人机 {drone_id} 连接已恢复'
+                }
+                self.alarm_history.append(alarm_record)
+                
+                # 打印恢复信息
+                print(f"\n✅ [{datetime.datetime.now().strftime('%H:%M:%S')}] "
+                      f"无人机 {drone_id} 连接已恢复！")
+    
+    def check_connection_timeout(self):
+        """
+        检查连接超时（在监控线程中运行）
+        """
+        while self.is_running:
+            current_time = time.time()
+            
+            with self.lock:
+                for drone_id in list(self.last_heartbeat_time.keys()):
+                    last_time = self.last_heartbeat_time[drone_id]
+                    time_diff = current_time - last_time
+                    current_status = self.alarm_status[drone_id]
+                    
+                    # 检查是否超过超时阈值
+                    if time_diff > self.timeout_threshold:
+                        # 计算新状态
+                        if time_diff > self.timeout_threshold * 3:  # 超过3倍阈值（9秒）
+                            new_status = self.ALARM_CRITICAL
+                        elif time_diff > self.timeout_threshold * 2:  # 超过2倍阈值（6秒）
+                            new_status = self.ALARM_WARNING
+                        else:  # 刚超过阈值（3秒）
+                            new_status = self.ALARM_WARNING
+                        
+                        # 如果状态发生变化，触发报警
+                        if new_status != current_status:
+                            self.alarm_status[drone_id] = new_status
+                            self.trigger_alarm(drone_id, time_diff, new_status)
+            
+            time.sleep(1)  # 每秒检查一次
+    
+    def trigger_alarm(self, drone_id: str, time_diff: float, status: int):
+        """
+        触发报警
+        
+        Args:
+            drone_id: 无人机ID
+            time_diff: 已超时时间（秒）
+            status: 报警状态
+        """
+        status_text = "警告" if status == self.ALARM_WARNING else "严重"
+        
+        # 报警消息
+        alarm_message = f"无人机 {drone_id} 已 {time_diff:.1f} 秒无响应！"
+        
+        # 创建报警记录
+        alarm_record = {
+            'drone_id': drone_id,
+            'type': 'timeout',
+            'severity': status_text,
+            'timeout_seconds': round(time_diff, 1),
+            'timestamp': datetime.datetime.now().isoformat(),
+            'message': alarm_message
+        }
+        
+        self.alarm_history.append(alarm_record)
+        
+        # 打印报警信息（使用醒目的格式）
+        print(f"\n{'=' * 60}")
+        print(f"🚨 [{datetime.datetime.now().strftime('%H:%M:%S')}] "
+              f"【{status_text}报警】{alarm_message}")
+        print(f"{'=' * 60}")
+        
+        # 如果是严重报警，打印更多信息
+        if status == self.ALARM_CRITICAL:
+            print(f"💀 无人机可能已失联，建议启动紧急程序！")
+            print(f"{'=' * 60}")
+    
+    def monitor_heartbeats(self, drone_simulator: DroneHeartbeatSimulator):
+        """
+        监控心跳包
+        
+        Args:
+            drone_simulator: 无人机心跳模拟器
+        """
+        print(f"\n📡 地面站 {self.station_id} 开始监控...")
+        print(f"⏱️  超时阈值: {self.timeout_threshold} 秒")
+        print("-" * 80)
+        
+        # 注册无人机
+        self.register_drone(drone_simulator.drone_id)
+        
+        while self.is_running:
+            heartbeat = drone_simulator.get_latest_heartbeat()
+            if heartbeat:
+                self.process_heartbeat(heartbeat)
+            time.sleep(0.1)  # 短暂休眠，避免CPU过载
+    
+    def start(self, drone_simulator: DroneHeartbeatSimulator):
+        """
+        启动地面站
+        
+        Args:
+            drone_simulator: 无人机心跳模拟器
+        """
+        if not self.is_running:
+            self.is_running = True
+            
+            # 启动监控线程
+            self.monitor_thread = threading.Thread(
+                target=self.monitor_heartbeats,
+                args=(drone_simulator,)
+            )
+            self.monitor_thread.daemon = True
+            self.monitor_thread.start()
+            
+            # 启动超时检查线程
+            self.alarm_thread = threading.Thread(
+                target=self.check_connection_timeout
+            )
+            self.alarm_thread.daemon = True
+            self.alarm_thread.start()
+            
+            print(f"\n🛸 地面站 {self.station_id} 已启动")
+    
+    def stop(self):
+        """
+        停止地面站
+        """
+        self.is_running = False
+        if self.monitor_thread:
+            self.monitor_thread.join(timeout=2)
+        if self.alarm_thread:
+            self.alarm_thread.join(timeout=2)
+        
+        # 显示统计信息
+        self.print_statistics()
+    
+    def print_statistics(self):
+        """打印统计信息"""
+        print("\n" + "=" * 80)
+        print(f"📊 地面站 {self.station_id} 统计报告")
+        print("=" * 80)
+        
+        for drone_id, heartbeats in self.received_heartbeats.items():
+            print(f"\n🚁 无人机: {drone_id}")
+            print(f"📨 接收心跳包: {len(heartbeats)}")
+            
+            if heartbeats:
+                # 计算平均间隔
+                last_time = None
+                intervals = []
+                for h in heartbeats:
+                    if last_time:
+                        interval = h['receive_time'] - last_time
+                        intervals.append(interval)
+                    last_time = h['receive_time']
+                
+                if intervals:
+                    avg_interval = sum(intervals) / len(intervals)
+                    print(f"⏱️  平均接收间隔: {avg_interval:.2f}秒")
+        
+        # 打印报警历史
+        if self.alarm_history:
+            print(f"\n🚨 报警历史 ({len(self.alarm_history)} 条):")
+            for alarm in self.alarm_history[-5:]:  # 显示最近5条
+                if alarm['type'] == 'timeout':
+                    print(f"  • [{alarm['timestamp'][11:19]}] {alarm['severity']}: "
+                          f"{alarm['message']}")
+                else:
+                    print(f"  • [{alarm['timestamp'][11:19]}] ✅ {alarm['message']}")
+    
+    def get_drone_status(self, drone_id: str) -> str:
+        """获取无人机状态"""
+        with self.lock:
+            if drone_id not in self.alarm_status:
+                return "未注册"
+            
+            status = self.alarm_status[drone_id]
+            if status == self.ALARM_NONE:
+                return "正常"
+            elif status == self.ALARM_WARNING:
+                return "警告"
+            else:
+                return "严重失联"
+
+
+def interactive_menu(drone: DroneHeartbeatSimulator, ground_station: GroundStation):
+    """
+    交互式菜单
+    
+    Args:
+        drone: 无人机模拟器
+        ground_station: 地面站
+    """
+    print("\n" + "=" * 80)
+    print("🕹️  交互式控制菜单")
+    print("=" * 80)
+    print("1. 查看无人机状态")
+    print("2. 查看地面站统计")
+    print("3. 查看报警历史")
+    print("4. 切换连接问题模拟 (当前: {})".format(
+        "开启" if drone.simulate_connection_issue else "关闭"))
+    print("5. 退出程序")
+    print("-" * 80)
+    
+    choice = input("请选择操作 (1-5): ").strip()
+    
+    if choice == '1':
+        status = ground_station.get_drone_status(drone.drone_id)
+        last_time = ground_station.last_heartbeat_time.get(drone.drone_id, 0)
+        time_diff = time.time() - last_time
+        
+        print(f"\n🚁 无人机状态:")
+        print(f"  • ID: {drone.drone_id}")
+        print(f"  • 状态: {status}")
+        print(f"  • 最后心跳: {time_diff:.1f}秒前")
+        print(f"  • 发送序号: {drone.sequence_number}")
+        
+    elif choice == '2':
+        ground_station.print_statistics()
+        
+    elif choice == '3':
+        if ground_station.alarm_history:
+            print(f"\n🚨 报警历史 (最近10条):")
+            for i, alarm in enumerate(ground_station.alarm_history[-10:], 1):
+                if alarm['type'] == 'timeout':
+                    print(f"  {i}. [{alarm['timestamp'][11:19]}] "
+                          f"【{alarm['severity']}】{alarm['message']}")
+                else:
+                    print(f"  {i}. [{alarm['timestamp'][11:19]}] "
+                          f"【恢复】{alarm['message']}")
+        else:
+            print("\n📭 暂无报警记录")
+            
+    elif choice == '4':
+        drone.toggle_connection_issue()
+        
+    elif choice == '5':
+        return False
+        
+    return True
+
+
+def main():
+    """
+    主函数
+    """
+    print("=" * 80)
+    print("🚁 无人机心跳监控系统 - 带连接超时报警")
+    print("=" * 80)
+    
+    # 创建无人机心跳模拟器
+    drone = DroneHeartbeatSimulator(drone_id="DJI-MAVIC-3")
+    
+    # 创建地面站（超时阈值：3秒）
+    ground_station = GroundStation(
+        station_id="GCS-BEIJING-001",
+        timeout_seconds=3
+    )
+    
+    try:
+        # 启动无人机心跳模拟
+        drone.start()
+        
+        # 启动地面站
+        ground_station.start(drone)
+        
+        print("\n系统运行中...")
+        print("提示: 按 'm' 键打开控制菜单，按 Ctrl+C 退出\n")
+        
+        # 主循环
+        while True:
+            # 等待用户输入
+            import sys
+            import select
+            
+            if sys.platform == 'win32':
+                # Windows系统
+                import msvcrt
+                if msvcrt.kbhit():
+                    key = msvcrt.getch().decode('utf-8', errors='ignore').lower()
+                    if key == 'm':
+                        if not interactive_menu(drone, ground_station):
+                            break
+            else:
+                # Linux/Mac系统
+                rlist, _, _ = select.select([sys.stdin], [], [], 1)
+                if rlist:
+                    key = sys.stdin.read(1).lower()
+                    if key == 'm':
+                        if not interactive_menu(drone, ground_station):
+                            break
+            
+            time.sleep(0.1)
+            
+    except KeyboardInterrupt:
+        print("\n\n正在停止系统...")
+    finally:
+        # 停止地面站
+        ground_station.stop()
+        
+        # 停止无人机
+        drone.stop()
+        
+        print("\n系统已正常停止")
+
+
+if __name__ == "__main__":
+    main()
