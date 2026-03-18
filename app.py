@@ -1,8 +1,4 @@
 import streamlit as st
-
-st.title("我的第一个 Streamlit 应用")
-st.write("部署成功！")
-import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
