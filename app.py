@@ -54,4 +54,28 @@ if coordinates:
 
     # 绘制轨迹线
     folium.PolyLine(
-        coo
+        coordinates,
+        color="blue",
+        weight=2.5,
+        opacity=1,
+        tooltip="飞行轨迹"
+    ).add_to(m)
+
+    # 添加起点和终点标记
+    folium.Marker(
+        coordinates[0],
+        popup="起点",
+        icon=folium.Icon(color="green", icon="play")
+    ).add_to(m)
+
+    folium.Marker(
+        coordinates[-1],
+        popup="终点",
+        icon=folium.Icon(color="red", icon="stop")
+    ).add_to(m)
+
+    # 在地图上显示
+    st_data = st_folium(m, width=700, height=500)
+else:
+    st.warning("请在左侧输入有效的坐标数据。")
+
