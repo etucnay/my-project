@@ -92,7 +92,7 @@ if st.sidebar.button("设置B点"):
         popup="终点 B",
         icon=folium.Icon(color='red', icon='stop')
     ).add_to(m)
-    st.sidebar.success(f"B点已设置: {final_lat_b}, final_lng_b}")
+    st.sidebar.success(f"B点已设置: {final_lat_b}, {final_lng_b}")
 
 # 3. 绘制障碍物 (示例：硬编码几个障碍物，或者通过点击地图获取)
 # 这里演示如何在AB连线中间画个圈作为障碍物示例
