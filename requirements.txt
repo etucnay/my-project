@@ -1,5 +1,6 @@
 streamlit
-folium
-streamlit-folium
-coordtransform
+pandas
+importlib-metadata>=6.0.0
+coordtransform   <-- 加上这一行！
+
 
