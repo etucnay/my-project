@@ -2,6 +2,7 @@ streamlit
 pandas
 folium
 streamlit-folium
-coordtransform
+coord-convert
+
 
 
