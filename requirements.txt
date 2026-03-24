@@ -1,4 +1,5 @@
-folium
 streamlit
-streamlit_folium
-gcoord
+folium
+streamlit-folium
+coordtransform
+
