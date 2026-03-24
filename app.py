@@ -1,8 +1,7 @@
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
-import coordtransform# 刚才安装的坐标系转换库
-
+import coordtransform
 # --- 页面配置 ---
 st.set_page_config(page_title="无人机测试轨迹可视化", layout="wide")
 
