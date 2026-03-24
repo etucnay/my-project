@@ -96,4 +96,4 @@ if coordinates:
     st_data = st_folium(m, width=700, height=500)
 
 else:
-    st.info("请在左侧输入有效的坐标数据")
+    st.info("请在左侧输入有效的坐标数据") 
