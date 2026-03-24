@@ -1,126 +1,117 @@
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
-import coordtransform # 用于坐标转换
+from pyproj import Transformer
 
 # --- 页面配置 ---
-st.set_page_config(page_title="无人机航线规划", layout="wide")
+st.set_page_config(page_title="无人机轨迹可视化", layout="wide")
 
-# --- 侧边栏/控制面板 (对应截图左侧) ---
-st.sidebar.header("⚙️ 控制面板")
+# --- 标题 ---
+st.title("🚁 无人机飞行轨迹监控系统")
 
-# 1. 坐标系选择
-coord_system = st.sidebar.radio(
-    "输入坐标系",
-    ("WGS-84 (GPS原始)", "GCJ-02 (高德/百度)")
-)
+# --- 侧边栏：模拟数据输入 ---
+st.sidebar.header("1. 输入无人机坐标数据")
+st.sidebar.info("请输入 WGS84 坐标 (GPS原始坐标)，用逗号分隔。格式：经度,纬度")
 
-# 2. A点/B点 输入框
-st.sidebar.subheader("📍 起点 A")
-lat_a = st.sidebar.number_input("纬度 A", value=32.2322, format="%.6f")
-lng_a = st.sidebar.number_input("经度 A", value=118.7490, format="%.6f")
+# 默认的模拟数据（北京某地）
+default_data = """116.397128,39.916527
+116.397500,39.916800
+116.398000,39.917000
+116.398500,39.916500
+116.399000,39.916000"""
 
-st.sidebar.subheader("🏁 终点 B")
-lat_b = st.sidebar.number_input("纬度 B", value=32.2343, format="%.6f")
-lng_b = st.sidebar.number_input("经度 B", value=118.7495, format="%.6f")
+input_data = st.sidebar.text_area("粘贴坐标数据：", value=default_data, height=200)
 
-# --- 地图初始化 (对应截图右侧) ---
-st.subheader("🗺️ 航线规划地图")
+# --- 数据处理函数 ---
+@st.cache_data
+def process_data(data_str):
+    """
+    解析文本数据，并使用 pyproj 将 WGS84 坐标转换为 Web Mercator (用于地图显示)
+    """
+    if not data_str.strip():
+        return []
 
-# 默认中心点设为A点
-center_lat = lat_a
-center_lng = lng_a
+    lines = data_str.strip().split('\n')
+    points = []
 
-# 创建 Folium 地图对象
-# tiles参数可以是 'OpenStreetMap', 'CartoDB Positron' 等，如果要卫星图需使用自定义URL
-m = folium.Map(location=[center_lat, center_lng], zoom_start=18, tiles=None)
+    # 定义转换器：从 WGS84 (GPS标准) 转换为 Web Mercator (地图标准)
+    # EPSG:4326 是经纬度标准
+    # EPSG:3857 是 Google Maps / Leaflet / Folium 使用的投影标准
+    transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 
-# 添加高德卫星图层 (解决"显示二维地图样貌/卫星图"的需求)
-# 注意：这里使用了高德的卫星图URL
-folium.TileLayer(
-    tiles='https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=6&x={x}&y={y}&z={z}',
-    attr='高德地图',
-    name='卫星图',
-    overlay=True,
-    control=True,
-    subdomains='1234'
-).add_to(m)
+    try:
+        for i, line in enumerate(lines):
+            parts = line.split(',')
+            if len(parts) >= 2:
+                # 尝试读取经度和纬度
+                lon = float(parts[0].strip())
+                lat = float(parts[1].strip())
 
-# 添加路网注记 (让地图上有路名文字)
-folium.TileLayer(
-    tiles='https://webst0{s}.is.autonavi.com/appmaptile?style=8&x={x}&y={y}&z={z}',
-    attr='高德地图',
-    name='路网',
-    overlay=True,
-    control=True,
-    subdomains='1234'
-).add_to(m)
+                # 进行坐标转换
+                x, y = transformer.transform(lon, lat)
 
-# --- 核心功能：坐标转换与绘图 ---
+                points.append({
+                    "id": i + 1,
+                    "original_lon": lon,
+                    "original_lat": lat,
+                    "map_x": x,
+                    "map_y": y
+                })
+        return points
+    except Exception as e:
+        st.error(f"数据解析错误: {e}")
+        return []
 
-def convert_coords(lat, lng, target):
-    """转换坐标系的辅助函数"""
-    if target == "WGS-84 (GPS原始)":
-        # 如果输入是WGS84，地图用的是GCJ02(高德)，需要转换
-        # 注意 gcoord 的数组顺序是 [经度, 纬度]
-        result = gcoord.transform(
-            [lng, lat],
-            gcoord.WGS84,
-            gcoord.GCJ02
-        )
-        return result[1], result[0] # 返回 lat, lng
-    else:
-        # 如果输入已经是GCJ02，直接返回
-        return lat, lng
+# --- 主程序逻辑 ---
 
-# 1. 处理 A 点
-if st.sidebar.button("设置A点"):
-    final_lat_a, final_lng_a = convert_coords(lat_a, lng_a, coord_system)
+# 1. 处理数据
+trajectory_points = process_data(input_data)
+
+if trajectory_points:
+    # 2. 获取第一个点作为地图中心
+    first_point = trajectory_points[0]
+
+    # 3. 创建地图对象
+    # 注意：folium 的 Location 需要传入原始的经纬度 (lat, lon)，而不是转换后的 x,y
+    m = folium.Map(
+        location=[first_point['original_lat'], first_point['original_lon']],
+        zoom_start=16,
+        tiles='OpenStreetMap' # 也可以使用 'Stamen Terrain' 或 'CartoDB Positron'
+    )
+
+    # 4. 提取轨迹线坐标 (Folium 需要原始的经纬度列表)
+    # 格式必须是 [[lat, lon], [lat, lon], ...]
+    route_coords = [[p['original_lat'], p['original_lon']] for p in trajectory_points]
+
+    # 5. 在地图上画线
+    folium.PolyLine(
+        route_coords,
+        color="blue",
+        weight=5,
+        opacity=0.8,
+        tooltip="无人机飞行轨迹"
+    ).add_to(m)
+
+    # 6. 标记起点和终点
     folium.Marker(
-        [final_lat_a, final_lng_a],
-        popup="起点 A",
-        icon=folium.Icon(color='green', icon='play')
+        route_coords[0],
+        popup="起飞点",
+        icon=folium.Icon(color="green", icon="play")
     ).add_to(m)
-    # 飞线逻辑可以在这里加
-    st.sidebar.success(f"A点已设置: {final_lat_a}, {final_lng_a}")
 
-# 2. 处理 B 点
-if st.sidebar.button("设置B点"):
-    final_lat_b, final_lng_b = convert_coords(lat_b, lng_b, coord_system)
     folium.Marker(
-        [final_lat_b, final_lng_b],
-        popup="终点 B",
-        icon=folium.Icon(color='red', icon='stop')
-    ).add_to(m)
-    st.sidebar.success(f"B点已设置: {final_lat_b}, {final_lng_b}")
-
-
-# 3. 绘制障碍物 (示例：硬编码几个障碍物，或者通过点击地图获取)
-# 这里演示如何在AB连线中间画个圈作为障碍物示例
-# 实际项目中，你可能需要让用户点击地图来添加，或者读取心跳包中的障碍物数据
-obstacles = [
-    [32.2330, 118.7492], # 示例障碍物坐标
-]
-
-for obs in obstacles:
-    # 如果障碍物坐标也是WGS84，记得也要转换！
-    folium.Circle(
-        radius=30, # 半径30米
-        location=obs,
-        popup="障碍物",
-        color="red",
-        fill=True,
-        fillColor="red"
+        route_coords[-1],
+        popup="降落点",
+        icon=folium.Icon(color="red", icon="stop")
     ).add_to(m)
 
-# --- 显示地图 ---
-# st_folium 是实现交互的关键
-output = st_folium(m, width=700, height=500)
+    # 7. 显示地图
+    st.subheader("🗺️ 实时轨迹地图")
+    st_folium(m, width=700, height=500)
 
-# --- 进阶：点击地图获取坐标 (方便画障碍物) ---
-# 如果用户点击了地图，显示坐标
-if output['last_clicked']:
-    click_lat = output['last_clicked']['lat']
-    click_lng = output['last_clicked']['lng']
-    st.info(f"你点击的位置坐标: {click_lat}, {click_lng}")
-    # 这里可以加个按钮“在此处添加障碍物”
+    # 8. 显示数据表格
+    with st.expander("查看坐标转换详情"):
+        st.dataframe(trajectory_points)
+
+else:
+    st.warning("请在左侧输入有效的坐标数据。")
