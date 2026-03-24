@@ -1,5 +1,9 @@
-plotly
+# 核心库
 streamlit
-streamlit-folium
 folium
+
+# Streamlit 组件
+streamlit-folium
+
+# 其他工具库
 gcoord
