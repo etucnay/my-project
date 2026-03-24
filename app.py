@@ -1,7 +1,7 @@
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
-import gcoord # 用于坐标转换
+import coordtransform # 用于坐标转换
 
 # --- 页面配置 ---
 st.set_page_config(page_title="无人机航线规划", layout="wide")
