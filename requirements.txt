@@ -1,7 +1,7 @@
 streamlit
 folium
 streamlit-folium
-pyproj
 coordtransform
+
 
 
