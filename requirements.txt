@@ -2,7 +2,11 @@ streamlit
 pandas
 folium
 streamlit-folium
+<<<<<<< HEAD
 pyproj
+=======
+coord-convert
+>>>>>>> 9828672e7636598a461e8e5b12447cb278eb6615
 
 
 
