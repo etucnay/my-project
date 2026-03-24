@@ -20,48 +20,42 @@ default_data = """116.397128,39.916527
 116.398500,39.916500
 116.399000,39.916000"""
 
-input_data = st.sidebar.text_area("粘贴坐标数据：", value=default_data, height=200)
+# 获取用户输入，如果没有输入则使用默认数据
+input_data = st.sidebar.text_area("粘贴坐标数据:", value=default_data, height=150)
 
 # --- 数据处理函数 ---
-@st.cache_data
-def process_data(data_str):
-    """
-    解析文本数据，提取经纬度
-    """
-    if not data_str.strip():
-        return []
-
+def parse_coordinates(data_str):
+    """将字符串解析为坐标列表"""
+    coords = []
     lines = data_str.strip().split('\n')
-    points = []
-
     for line in lines:
-        parts = line.split(',')
-        if len(parts) == 2:
+        if ',' in line:
             try:
-                lng = float(parts[0].strip())
-                lat = float(parts[1].strip())
-                points.append((lat, lng)) # Folium 需要 (lat, lng) 格式
+                lon, lat = map(float, line.split(','))
+                coords.append((lat, lon)) # 注意：folium使用 (lat, lon)
             except ValueError:
                 continue
-    return points
+    return coords
 
 # --- 主程序逻辑 ---
-coordinates = process_data(input_data)
+coordinates = parse_coordinates(input_data)
 
 if coordinates:
-    # 创建地图，中心点设为第一个坐标
+    st.success(f"成功解析到 {len(coordinates)} 个坐标点！")
+
+    # 1. 创建地图对象，中心点设为第一个坐标
     m = folium.Map(location=coordinates[0], zoom_start=15)
 
-    # 绘制轨迹线
+    # 2. 添加轨迹线
     folium.PolyLine(
         coordinates,
         color="blue",
         weight=2.5,
-        opacity=1,
+        opacity=0.8,
         tooltip="飞行轨迹"
     ).add_to(m)
 
-    # 添加起点和终点标记
+    # 3. 添加起点和终点标记
     folium.Marker(
         coordinates[0],
         popup="起点",
@@ -74,8 +68,15 @@ if coordinates:
         icon=folium.Icon(color="red", icon="stop")
     ).add_to(m)
 
-    # 在地图上显示
-    st_data = st_folium(m, width=700, height=500)
+    # 4. 自动调整视野以适应所有点
+    # 创建一个包含所有点的矩形框
+    # 注意：folium的LatLngBounds需要 (lat, lon)
+    # 这里我们手动计算边界或使用 fit_bounds
+    m.fit_bounds(coordinates)
+
+    # 5. 在页面上显示地图
+    st_folium(m, width=700, height=500)
+
 else:
-    st.warning("请在左侧输入有效的坐标数据。")
+    st.warning("请在左侧输入有效的坐标数据，格式：经度,纬度")
 
