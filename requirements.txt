@@ -2,7 +2,6 @@ streamlit
 folium
 streamlit-folium
 pyproj
-coordtransform  <-- 加上这一行
-
+coordtransform
 
 
