@@ -1,4 +1,9 @@
+streamlit
+folium
+streamlit-folium
 coordtransform
+pandas
+
 
 
 
