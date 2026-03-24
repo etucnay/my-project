@@ -1,6 +1,3 @@
-streamlit
-folium
-streamlit-folium
 coordtransform
 
 
