@@ -1,99 +1,191 @@
 import streamlit as st
-import folium
-from streamlit_folium import st_folium
-import coordtransform  # 刚才安装的坐标系转换库
+import pandas as pd
+import plotly.graph_objects as go
+import pydeck as pdk
+import time
+from datetime import datetime
 
-# --- 页面配置 ---
-st.set_page_config(page_title="无人机轨迹可视化", layout="wide")
+# ==================== 页面配置 ====================
+st.set_page_config(layout="wide", page_title="无人机地面站")
+st.sidebar.title("导航")
+page = st.sidebar.radio("功能页面", ["航线规划", "飞行监控"])
 
-# --- 标题 ---
-st.title("🚁 无人机飞行轨迹监控系统")
+# ==================== 初始化 session_state ====================
+if "point_a" not in st.session_state:
+    # 南京科技职业学院附近坐标 (GCJ-02)
+    st.session_state.point_a = (32.2322, 118.749)   # (纬度, 经度)
+    st.session_state.point_b = (32.2343, 118.749)
+    st.session_state.obstacles = [
+        (32.2325, 118.7487, 35),
+        (32.2329, 118.7485, 45),
+        (32.2333, 118.7488, 30),
+        (32.2337, 118.7490, 50),
+        (32.2339, 118.7493, 40),
+    ]
+if "coord_system" not in st.session_state:
+    st.session_state.coord_system = "GCJ-02 (高德/百度)"
+if "running" not in st.session_state:
+    st.session_state.running = False
+if "heartbeat_data" not in st.session_state:
+    st.session_state.heartbeat_data = []
+if "last_received_time" not in st.session_state:
+    st.session_state.last_received_time = time.time()
 
-# --- 侧边栏：输入数据 ---
-st.sidebar.header("1. 坐标系设置")
-coord_system = st.sidebar.radio(
-    "选择输入坐标系:",
-    ("WGS-84 (GPS原始坐标)", "GCJ-02 (高德/腾讯坐标)")
-)
-
-st.sidebar.header("2. 输入无人机坐标数据")
-st.sidebar.info("请输入坐标，用逗号分隔。格式：经度,纬度")
-
-# 默认数据（模拟北京某地）
-default_data = """116.397128,39.916527
-116.397500,39.916800
-116.398000,39.917000
-116.398500,39.916500
-116.399000,39.916000"""
-
-input_data = st.sidebar.text_area("坐标数据:", value=default_data, height=200)
-
-# --- 3. 数据处理与转换 ---
-coordinates = []
-if input_data:
-    lines = input_data.strip().split('\n')
-    for line in lines:
-        line = line.strip()
-        if line:
-            try:
-                lon, lat = map(float, line.split(','))
-
-                # 如果是 WGS-84，就转成 GCJ-02
-                # 如果本来就是 GCJ-02，就不转
-                if "WGS" in coord_system:
-                    gcj_lon, gcj_lat = coordtransform.wgs84_to_gcj02(lon, lat)
-                else:
-                    gcj_lon, gcj_lat = lon, lat
-
-                coordinates.append((gcj_lat, gcj_lon)) # Folium 需要 (纬度, 经度) 的顺序
-
-            except ValueError:
-                st.sidebar.warning(f"无法解析这一行: {line}")
-
-# --- 4. 绘制地图 ---
-st.subheader("🗺️ 实时轨迹地图")
-
-if coordinates:
-    # 取第一个点作为地图中心
-    center_lat, center_lon = coordinates[0]
-
-    # 创建地图对象
-    # tiles 参数控制地图样式：
-    # 'OpenStreetMap' (默认，国内经常加载不出)
-    # 'CartoDB Positron' (白底图，很清晰)
-    # 'Stamen Terrain' (地形图)
-    # 为了模拟你图片里的卫星图效果，我们尝试用 'CartoDB Positron' 或者保持默认
-    m = folium.Map(
-        location=[center_lat, center_lon],
-        zoom_start=16,
-        tiles='CartoDB Positron' # 这里可以换成 'OpenStreetMap' 试试
+# ==================== 地图绘制函数（航线规划使用）====================
+def draw_3d_map(point_a, point_b, obstacles):
+    """绘制3D地图，包含起点A、终点B和障碍物"""
+    # 起点A（绿色）
+    a_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=[{"lat": point_a[0], "lon": point_a[1]}],
+        get_position="[lon, lat]",
+        get_color="[0, 255, 0, 200]",
+        get_radius=100,
+        pickable=True,
     )
+    # 终点B（红色）
+    b_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=[{"lat": point_b[0], "lon": point_b[1]}],
+        get_position="[lon, lat]",
+        get_color="[255, 0, 0, 200]",
+        get_radius=100,
+        pickable=True,
+    )
+    # 障碍物（橙色柱状）
+    obs_data = [{"lat": o[0], "lon": o[1], "height": o[2]} for o in obstacles]
+    obstacle_layer = pdk.Layer(
+        "ColumnLayer",
+        data=obs_data,
+        get_position="[lon, lat]",
+        get_elevation="height",
+        elevation_scale=80,
+        radius=25,
+        get_fill_color="[255, 165, 0, 200]",
+        pickable=True,
+    )
+    # 视图居中，倾斜视角增强3D效果
+    center_lat = (point_a[0] + point_b[0]) / 2
+    center_lon = (point_a[1] + point_b[1]) / 2
+    view_state = pdk.ViewState(
+        latitude=center_lat,
+        longitude=center_lon,
+        zoom=14,
+        pitch=60,
+        bearing=0,
+    )
+    r = pdk.Deck(
+        layers=[a_layer, b_layer, obstacle_layer],
+        initial_view_state=view_state,
+        tooltip={"text": "高度: {height} m" if "height" in obs_data[0] else "{position}"},
+    )
+    st.pydeck_chart(r)
 
-    # 添加轨迹线
-    folium.PolyLine(
-        coordinates,
-        color="blue",
-        weight=5,
-        opacity=0.8,
-        tooltip="无人机轨迹"
-    ).add_to(m)
+# ==================== 心跳监控函数（飞行监控使用）====================
+def heartbeat_monitor():
+    """飞行监控页面：心跳模拟与可视化"""
+    st.subheader("飞行监控")
+    data = st.session_state.heartbeat_data
+    placeholder = st.empty()          # 用于动态显示表格
+    chart_placeholder = st.empty()    # 用于动态显示图表
 
-    # 添加起点和终点标记
-    folium.Marker(
-        coordinates[0],
-        popup="起点",
-        icon=folium.Icon(color="green", icon="play")
-    ).add_to(m)
+    # 模拟10次心跳（可根据需要修改循环次数）
+    for i in range(1, 11):
+        current_time = time.time()
+        # 添加一条心跳记录
+        data.append({
+            "序号": len(data) + 1,
+            "时间": datetime.now().strftime("%H:%M:%S"),
+            "接收": 1
+        })
+        # 显示最近10条数据
+        df = pd.DataFrame(data)
+        placeholder.dataframe(df.tail(10))
 
-    folium.Marker(
-        coordinates[-1],
-        popup="终点",
-        icon=folium.Icon(color="red", icon="stop")
-    ).add_to(m)
+        # 绘制折线图（心跳序号随时间变化）
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=list(range(1, len(data)+1)),
+            y=[1]*len(data),
+            mode='lines+markers',
+            name='心跳状态'
+        ))
+        fig.update_layout(
+            title="心跳序号随时间变化",
+            xaxis_title="序号",
+            yaxis_title="是否接收"
+        )
+        chart_placeholder.plotly_chart(fig, use_container_width=True)
 
-    # 在 Streamlit 中显示地图
-    # 注意：height 和 width 必须设置，否则可能不显示
-    st_data = st_folium(m, width=700, height=500)
+        # 掉线检测：如果距离上次接收超过3秒，则报警
+        if current_time - st.session_state.last_received_time > 3:
+            st.error("连接超时！")
+        st.session_state.last_received_time = current_time
 
-else:
-    st.info("请在左侧输入有效的坐标数据")
+        time.sleep(1)   # 模拟每秒一次心跳
+    st.success("演示结束")
+
+# ==================== 页面路由 ====================
+if page == "航线规划":
+    st.header("航线规划")
+    # 坐标系选择
+    coord_system = st.radio(
+        "坐标系统",
+        ["GCJ-02 (高德/百度)", "WGS-84 (GPS)"],
+        horizontal=True,
+        key="coord_radio"
+    )
+    st.session_state.coord_system = coord_system
+    st.markdown(f"### 当前坐标系：{coord_system}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("起点 A")
+        lat_a = st.number_input(
+            f"纬度 ({coord_system})",
+            value=st.session_state.point_a[0],
+            step=0.0001,
+            format="%.6f",
+            key="lat_a"
+        )
+        lon_a = st.number_input(
+            f"经度 ({coord_system})",
+            value=st.session_state.point_a[1],
+            step=0.0001,
+            format="%.6f",
+            key="lon_a"
+        )
+        if st.button("设置A点"):
+            st.session_state.point_a = (lat_a, lon_a)
+            st.success("A点已设置")
+    with col2:
+        st.subheader("终点 B")
+        lat_b = st.number_input(
+            f"纬度 ({coord_system})",
+            value=st.session_state.point_b[0],
+            step=0.0001,
+            format="%.6f",
+            key="lat_b"
+        )
+        lon_b = st.number_input(
+            f"经度 ({coord_system})",
+            value=st.session_state.point_b[1],
+            step=0.0001,
+            format="%.6f",
+            key="lon_b"
+        )
+        if st.button("设置B点"):
+            st.session_state.point_b = (lat_b, lon_b)
+            st.success("B点已设置")
+
+    st.slider("设定飞行高度 (m)", 0, 200, 50, key="flight_height")
+    # 调用地图绘制函数（显示在航线规划页面）
+    draw_3d_map(
+        st.session_state.point_a,
+        st.session_state.point_b,
+        st.session_state.obstacles
+    )
+    st.caption("提示：绿色为起点A，红色为终点B，橙色柱体为障碍物。鼠标拖拽可旋转视角。")
+
+else:   # 页面为“飞行监控”
+    heartbeat_monitor()
