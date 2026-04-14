@@ -336,4 +336,4 @@ with tab1:
                 save_obstacles()
                 st.success(f"已保存 {len(st.session_state.obstacles)} 个障碍物！")
         with col_btn2:
-            if st.button("📂 加载配置", key="load_obs
+            if st.button("📂 加载配置", key="load_obs", use_container_width=True):
