@@ -19,7 +19,6 @@ st.title("🚁 无人机航线规划与障碍物管理系统")
 
 # ====================== 配置文件 ======================
 CONFIG_FILE = "obstacle_config.json"
-PENDING_FILE = "pending_obstacle.json"
 
 # ====================== 初始化 ======================
 if "start_point" not in st.session_state:
@@ -44,6 +43,8 @@ if "pending_polygon" not in st.session_state:
     st.session_state.pending_polygon = None
 if "last_drawings" not in st.session_state:
     st.session_state.last_drawings = None
+if "set_mode" not in st.session_state:
+    st.session_state.set_mode = None  # 'start' 或 'end'
 
 # ====================== 保存/加载 ======================
 def save_data():
@@ -324,7 +325,7 @@ tab1, tab2 = st.tabs(["🗺️ 地图与航线规划", "📡 飞行监控"])
 # ====================== 标签页1 ======================
 with tab1:
     # 按钮栏
-    col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
+    col_btn1, col_btn2, col_btn3, col_btn4, col_btn5 = st.columns(5)
     with col_btn1:
         if st.button("🎯 规划航线", use_container_width=True, type="primary"):
             plan_route()
@@ -350,24 +351,55 @@ with tab1:
             st.session_state.current_route = []
             save_data()
             st.rerun()
+    with col_btn5:
+        if st.button("❌ 取消模式", use_container_width=True):
+            st.session_state.set_mode = None
+            st.success("已退出坐标设置模式")
+            st.rerun()
     
     st.divider()
+    
+    # 坐标设置模式提示
+    if st.session_state.set_mode == 'start':
+        st.info("🔴 当前模式：设置起点 - 请点击地图上的位置")
+    elif st.session_state.set_mode == 'end':
+        st.info("🟢 当前模式：设置终点 - 请点击地图上的位置")
     
     col1, col2 = st.columns([3, 1])
     
     with col1:
-        st.subheader("🗺️ 地图（绘制多边形添加障碍物）")
-        st.caption("💡 提示：点击左侧🟦多边形工具，在地图上绘制障碍物区域")
+        st.subheader("🗺️ 地图")
+        st.caption("💡 提示：点击下方按钮进入坐标设置模式，然后点击地图设置起点/终点")
         
         # 创建并显示地图
         m = create_map()
-        output = st_folium(m, width=850, height=550, returned_objects=["all_drawings"])
+        output = st_folium(m, width=850, height=550, returned_objects=["last_clicked", "all_drawings"])
         
-        # 处理新绘制的多边形 - 使用session_state避免重复
+        # 处理地图点击事件（用于设置起点/终点）
+        if output and output.get("last_clicked"):
+            clicked = output["last_clicked"]
+            if clicked and "lat" in clicked and "lng" in clicked:
+                lat, lng = clicked["lat"], clicked["lng"]
+                
+                if st.session_state.set_mode == 'start':
+                    st.session_state.start_point = (lat, lng)
+                    st.session_state.current_route = []
+                    st.session_state.set_mode = None
+                    save_data()
+                    st.success(f"✅ 起点已设置为: ({lat:.6f}, {lng:.6f})")
+                    st.rerun()
+                elif st.session_state.set_mode == 'end':
+                    st.session_state.end_point = (lat, lng)
+                    st.session_state.current_route = []
+                    st.session_state.set_mode = None
+                    save_data()
+                    st.success(f"✅ 终点已设置为: ({lat:.6f}, {lng:.6f})")
+                    st.rerun()
+        
+        # 处理新绘制的多边形
         if output and output.get("all_drawings"):
             current_drawings = output["all_drawings"]
             
-            # 检查是否有新绘制的多边形
             if current_drawings != st.session_state.last_drawings:
                 st.session_state.last_drawings = current_drawings
                 
@@ -418,8 +450,24 @@ with tab1:
     with col2:
         st.subheader("⚙️ 参数设置")
         
-        # 起点设置
-        with st.expander("📍 起点设置", expanded=True):
+        # 坐标设置按钮
+        st.markdown("### 🎯 坐标设置")
+        st.caption("点击下方按钮后，再点击地图上的位置")
+        
+        col_set1, col_set2 = st.columns(2)
+        with col_set1:
+            if st.button("📍 设置起点", use_container_width=True, type="primary"):
+                st.session_state.set_mode = 'start'
+                st.rerun()
+        with col_set2:
+            if st.button("🏁 设置终点", use_container_width=True, type="primary"):
+                st.session_state.set_mode = 'end'
+                st.rerun()
+        
+        st.divider()
+        
+        # 起点手动输入
+        with st.expander("📍 起点手动输入", expanded=False):
             col_s1, col_s2 = st.columns(2)
             with col_s1:
                 new_start_lat = st.number_input("纬度", value=st.session_state.start_point[0], format="%.6f")
@@ -434,8 +482,8 @@ with tab1:
             
             st.caption(f"当前: {st.session_state.start_point[0]:.6f}, {st.session_state.start_point[1]:.6f}")
         
-        # 终点设置
-        with st.expander("🏁 终点设置", expanded=True):
+        # 终点手动输入
+        with st.expander("🏁 终点手动输入", expanded=False):
             col_e1, col_e2 = st.columns(2)
             with col_e1:
                 new_end_lat = st.number_input("纬度", value=st.session_state.end_point[0], format="%.6f")
@@ -449,37 +497,6 @@ with tab1:
                 st.rerun()
             
             st.caption(f"当前: {st.session_state.end_point[0]:.6f}, {st.session_state.end_point[1]:.6f}")
-        
-        st.divider()
-        
-        # 快速调整
-        with st.expander("🔧 快速微调", expanded=False):
-            st.caption("微调起点位置")
-            col_q1, col_q2, col_q3, col_q4 = st.columns(4)
-            with col_q1:
-                if st.button("⬆️ 上移", key="up"):
-                    lat, lng = st.session_state.start_point
-                    st.session_state.start_point = (lat + 0.00005, lng)
-                    st.session_state.current_route = []
-                    st.rerun()
-            with col_q2:
-                if st.button("⬇️ 下移", key="down"):
-                    lat, lng = st.session_state.start_point
-                    st.session_state.start_point = (lat - 0.00005, lng)
-                    st.session_state.current_route = []
-                    st.rerun()
-            with col_q3:
-                if st.button("⬅️ 左移", key="left"):
-                    lat, lng = st.session_state.start_point
-                    st.session_state.start_point = (lat, lng - 0.00005)
-                    st.session_state.current_route = []
-                    st.rerun()
-            with col_q4:
-                if st.button("➡️ 右移", key="right"):
-                    lat, lng = st.session_state.start_point
-                    st.session_state.start_point = (lat, lng + 0.00005)
-                    st.session_state.current_route = []
-                    st.rerun()
         
         st.divider()
         
@@ -529,7 +546,7 @@ with tab1:
         # 障碍物列表
         if st.session_state.obstacles:
             for i, obs in enumerate(st.session_state.obstacles):
-                col_a, col_b, col_c = st.columns([3, 1, 1])
+                col_a, col_b = st.columns([4, 1])
                 with col_a:
                     height = obs.get('height', 0)
                     name = obs.get('name', '未知')
@@ -540,9 +557,6 @@ with tab1:
                         st.markdown(f"**🟢 {name}**")
                         st.caption(f"📏 {height}m (可飞越)")
                 with col_b:
-                    if st.button("✏️", key=f"edit_{i}"):
-                        st.info("编辑功能开发中")
-                with col_c:
                     if st.button("🗑️", key=f"del_{i}"):
                         st.session_state.obstacles.pop(i)
                         st.session_state.current_route = []
@@ -561,11 +575,6 @@ with tab1:
                 total_dist += calculate_distance(st.session_state.current_route[i], st.session_state.current_route[i+1])
             st.metric("总距离", f"{total_dist:.1f} m")
             st.metric("航点数", len(st.session_state.current_route))
-            
-            # 显示航线详情
-            with st.expander("📋 航线详情"):
-                for i, point in enumerate(st.session_state.current_route):
-                    st.text(f"航点 {i+1}: ({point[0]:.6f}, {point[1]:.6f})")
 
 # ====================== 标签页2：飞行监控 ======================
 with tab2:
@@ -657,4 +666,4 @@ if st.session_state.heartbeat_running:
 
 # ====================== 页脚 ======================
 st.markdown("---")
-st.markdown("🚁 无人机航线规划系统 | 绘制多边形 → 填写高度 → 点击规划航线")
+st.markdown("🚁 无人机航线规划系统 | 点击「设置起点/终点」→ 点击地图 → 绘制多边形 → 规划航线")
