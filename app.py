@@ -93,7 +93,7 @@ def calculate_safe_path(start, end, obstacles, safety_radius, mode="best"):
     end_lat, end_lng = end
     
     # 高度判断：直飞/绕行
-    max_obstacle_height = max([obs["height"] for obs in obstacles]) if obstacles else 0
+    max_obstacle_height = max([obs.get("height", 0) for obs in obstacles]) if obstacles else 0
     if st.session_state.flight_altitude > max_obstacle_height:
         return [start, end]
     
