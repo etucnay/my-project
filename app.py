@@ -44,7 +44,9 @@ if "pending_polygon" not in st.session_state:
 if "last_drawings" not in st.session_state:
     st.session_state.last_drawings = None
 if "set_mode" not in st.session_state:
-    st.session_state.set_mode = None  # 'start' 或 'end'
+    st.session_state.set_mode = None
+if "route_mode" not in st.session_state:
+    st.session_state.route_mode = "best"  # best, left, right
 
 # ====================== 保存/加载 ======================
 def save_data():
@@ -54,6 +56,7 @@ def save_data():
         "end_point": st.session_state.end_point,
         "flight_altitude": st.session_state.flight_altitude,
         "safety_radius": st.session_state.safety_radius,
+        "route_mode": st.session_state.route_mode,
         "save_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -68,11 +71,13 @@ def load_data():
         st.session_state.end_point = tuple(data.get("end_point", (32.2337, 118.7496)))
         st.session_state.flight_altitude = data.get("flight_altitude", 15.0)
         st.session_state.safety_radius = data.get("safety_radius", 10.0)
+        st.session_state.route_mode = data.get("route_mode", "best")
 
 load_data()
 
 # ====================== 几何计算函数 ======================
 def point_in_polygon(point, polygon):
+    """射线法判断点是否在多边形内"""
     x, y = point
     inside = False
     n = len(polygon)
@@ -84,6 +89,7 @@ def point_in_polygon(point, polygon):
     return inside
 
 def segments_intersect(p1, p2, p3, p4):
+    """判断线段是否相交"""
     def cross(o, a, b):
         return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
     
@@ -97,6 +103,7 @@ def segments_intersect(p1, p2, p3, p4):
     return False
 
 def line_intersects_polygon(line_start, line_end, polygon):
+    """判断线段是否与多边形相交"""
     for i in range(len(polygon)):
         p1 = polygon[i]
         p2 = polygon[(i + 1) % len(polygon)]
@@ -107,6 +114,7 @@ def line_intersects_polygon(line_start, line_end, polygon):
     return False
 
 def calculate_distance(point1, point2):
+    """计算两点间距离（米）"""
     lat1, lng1 = point1
     lat2, lng2 = point2
     R = 6371000
@@ -118,7 +126,46 @@ def calculate_distance(point1, point2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
 
+def get_perpendicular_offset(point1, point2, distance_m, direction='left'):
+    """获取垂直于线段方向的偏移点"""
+    lat1, lng1 = point1
+    lat2, lng2 = point2
+    
+    # 计算中点纬度用于经纬度转换
+    lat_mid = (lat1 + lat2) / 2
+    lng_per_m = 1 / (111320 * math.cos(math.radians(lat_mid)))
+    lat_per_m = 1 / 111320
+    
+    # 方向向量
+    dx = lng2 - lng1
+    dy = lat2 - lat1
+    dist = math.sqrt(dx**2 + dy**2)
+    
+    if dist < 1e-6:
+        return point1
+    
+    ux = dx / dist
+    uy = dy / dist
+    
+    # 垂直向量
+    if direction == 'left':
+        nx = -uy
+        ny = ux
+    else:
+        nx = uy
+        ny = -ux
+    
+    offset_lat = distance_m * lat_per_m
+    offset_lng = distance_m * lng_per_m
+    
+    # 返回线段中点的偏移点
+    mid_lat = (lat1 + lat2) / 2
+    mid_lng = (lng1 + lng2) / 2
+    
+    return (mid_lat + ny * offset_lat, mid_lng + nx * offset_lng)
+
 def is_path_safe(point1, point2, obstacles, flight_altitude):
+    """检查路径段是否安全"""
     for obs in obstacles:
         obs_height = obs.get("height", 0)
         if obs_height >= flight_altitude:
@@ -127,97 +174,148 @@ def is_path_safe(point1, point2, obstacles, flight_altitude):
                 return False
     return True
 
-def find_safe_waypoints(start, end, obstacles, flight_altitude, safety_radius):
-    if is_path_safe(start, end, obstacles, flight_altitude):
-        return [start, end]
+def find_safe_route_left(start, end, obstacles, flight_altitude, safety_radius):
+    """左侧绕行算法"""
+    waypoints = [start]
+    current = start
     
-    for obs in obstacles:
-        obs_height = obs.get("height", 0)
-        if obs_height >= flight_altitude:
-            polygon = obs.get("polygon", [])
-            if polygon and line_intersects_polygon(start, end, polygon):
-                center_lat = sum([p[0] for p in polygon]) / len(polygon)
-                center_lng = sum([p[1] for p in polygon]) / len(polygon)
-                
-                lat_mid = (start[0] + end[0]) / 2
-                lng_per_m = 1 / (111320 * math.cos(math.radians(lat_mid)))
-                lat_per_m = 1 / 111320
-                
-                offset_dist = safety_radius * 2
-                offset_lat = offset_dist * lat_per_m
-                offset_lng = offset_dist * lng_per_m
-                
-                left_point = (center_lat + offset_lat, center_lng - offset_lng)
-                right_point = (center_lat - offset_lat, center_lng + offset_lng)
-                
-                left_path1_safe = is_path_safe(start, left_point, obstacles, flight_altitude)
-                left_path2_safe = is_path_safe(left_point, end, obstacles, flight_altitude)
-                right_path1_safe = is_path_safe(start, right_point, obstacles, flight_altitude)
-                right_path2_safe = is_path_safe(right_point, end, obstacles, flight_altitude)
-                
-                if left_path1_safe and left_path2_safe:
-                    return [start, left_point, end]
-                elif right_path1_safe and right_path2_safe:
-                    return [start, right_point, end]
-                else:
-                    dx = end[1] - start[1]
-                    dy = end[0] - start[0]
-                    dist = math.sqrt(dx**2 + dy**2)
-                    if dist > 0:
-                        ux = dx / dist
-                        uy = dy / dist
-                        nx = -uy
-                        ny = ux
-                        
-                        offset_m = safety_radius * 2
-                        offset_lat2 = offset_m * lat_per_m
-                        offset_lng2 = offset_m * lng_per_m
-                        
-                        mid1 = (start[0] + (end[0] - start[0]) * 0.3, start[1] + (end[1] - start[1]) * 0.3)
-                        mid2 = (start[0] + (end[0] - start[0]) * 0.7, start[1] + (end[1] - start[1]) * 0.7)
-                        
-                        waypoint1 = (mid1[0] + ny * offset_lat2, mid1[1] + nx * offset_lng2)
-                        waypoint2 = (mid2[0] + ny * offset_lat2, mid2[1] + nx * offset_lng2)
-                        
-                        return [start, waypoint1, waypoint2, end]
+    # 获取垂直于AB方向的左侧偏移点
+    offset_point = get_perpendicular_offset(start, end, safety_radius * 2, 'left')
     
-    return [start, end]
+    # 检查是否需要多个绕行点
+    if not is_path_safe(start, offset_point, obstacles, flight_altitude):
+        # 如果左侧点不安全，增加偏移距离
+        offset_point = get_perpendicular_offset(start, end, safety_radius * 4, 'left')
+    
+    waypoints.append(offset_point)
+    
+    # 从偏移点到终点
+    if is_path_safe(offset_point, end, obstacles, flight_altitude):
+        waypoints.append(end)
+    else:
+        # 需要第二个绕行点
+        offset_point2 = get_perpendicular_offset(offset_point, end, safety_radius * 2, 'left')
+        waypoints.append(offset_point2)
+        waypoints.append(end)
+    
+    return waypoints
+
+def find_safe_route_right(start, end, obstacles, flight_altitude, safety_radius):
+    """右侧绕行算法"""
+    waypoints = [start]
+    current = start
+    
+    # 获取垂直于AB方向的右侧偏移点
+    offset_point = get_perpendicular_offset(start, end, safety_radius * 2, 'right')
+    
+    # 检查是否需要多个绕行点
+    if not is_path_safe(start, offset_point, obstacles, flight_altitude):
+        offset_point = get_perpendicular_offset(start, end, safety_radius * 4, 'right')
+    
+    waypoints.append(offset_point)
+    
+    # 从偏移点到终点
+    if is_path_safe(offset_point, end, obstacles, flight_altitude):
+        waypoints.append(end)
+    else:
+        offset_point2 = get_perpendicular_offset(offset_point, end, safety_radius * 2, 'right')
+        waypoints.append(offset_point2)
+        waypoints.append(end)
+    
+    return waypoints
+
+def find_safe_route_best(start, end, obstacles, flight_altitude, safety_radius):
+    """最佳绕行算法 - 选择较短的路径"""
+    left_route = find_safe_route_left(start, end, obstacles, flight_altitude, safety_radius)
+    right_route = find_safe_route_right(start, end, obstacles, flight_altitude, safety_radius)
+    
+    # 计算两条路径的长度
+    left_dist = 0
+    for i in range(len(left_route) - 1):
+        left_dist += calculate_distance(left_route[i], left_route[i+1])
+    
+    right_dist = 0
+    for i in range(len(right_route) - 1):
+        right_dist += calculate_distance(right_route[i], right_route[i+1])
+    
+    # 返回较短的路径
+    if left_dist <= right_dist:
+        return left_route
+    else:
+        return right_route
 
 def plan_route():
+    """规划航线 - 根据选择的模式"""
     start = st.session_state.start_point
     end = st.session_state.end_point
     obstacles = st.session_state.obstacles
     altitude = st.session_state.flight_altitude
     safety_radius = st.session_state.safety_radius
+    mode = st.session_state.route_mode
     
+    # 筛选需要避开的障碍物（高度高于飞行高度）
     high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= altitude]
     
+    # 如果没有需要避开的障碍物，直接返回直线
     if not high_obstacles:
         st.session_state.current_route = [start, end]
         return
     
+    # 检查直线是否安全
     if is_path_safe(start, end, high_obstacles, altitude):
         st.session_state.current_route = [start, end]
         return
     
-    route = find_safe_waypoints(start, end, high_obstacles, altitude, safety_radius)
+    # 根据模式选择绕行算法
+    if mode == "left":
+        route = find_safe_route_left(start, end, high_obstacles, altitude, safety_radius)
+    elif mode == "right":
+        route = find_safe_route_right(start, end, high_obstacles, altitude, safety_radius)
+    else:  # best
+        route = find_safe_route_best(start, end, high_obstacles, altitude, safety_radius)
     
-    max_iterations = 5
+    # 验证并优化路径
+    max_iterations = 3
     for _ in range(max_iterations):
         all_safe = True
+        new_route = [route[0]]
+        
         for i in range(len(route) - 1):
-            if not is_path_safe(route[i], route[i+1], high_obstacles, altitude):
+            p1 = route[i]
+            p2 = route[i + 1]
+            
+            if is_path_safe(p1, p2, high_obstacles, altitude):
+                new_route.append(p2)
+            else:
+                # 在危险段中间添加偏移点
                 all_safe = False
-                mid = ((route[i][0] + route[i+1][0]) / 2, (route[i][1] + route[i+1][1]) / 2)
-                lat_mid = (route[i][0] + route[i+1][0]) / 2
+                mid_lat = (p1[0] + p2[0]) / 2
+                mid_lng = (p1[1] + p2[1]) / 2
+                
+                # 计算偏移方向
+                lat_mid = mid_lat
                 lng_per_m = 1 / (111320 * math.cos(math.radians(lat_mid)))
                 lat_per_m = 1 / 111320
-                offset = safety_radius * 2
-                offset_lat = offset * lat_per_m
-                offset_lng = offset * lng_per_m
-                mid_offset = (mid[0] + offset_lat, mid[1] + offset_lng)
-                route.insert(i+1, mid_offset)
-                break
+                
+                # 默认向外偏移
+                if mode == "left":
+                    offset_point = get_perpendicular_offset(p1, p2, safety_radius * 2, 'left')
+                elif mode == "right":
+                    offset_point = get_perpendicular_offset(p1, p2, safety_radius * 2, 'right')
+                else:
+                    # 最佳模式：尝试两个方向
+                    left_offset = get_perpendicular_offset(p1, p2, safety_radius * 2, 'left')
+                    right_offset = get_perpendicular_offset(p1, p2, safety_radius * 2, 'right')
+                    # 选择离路径更近的点
+                    if calculate_distance(mid_lat, left_offset) < calculate_distance(mid_lat, right_offset):
+                        offset_point = left_offset
+                    else:
+                        offset_point = right_offset
+                
+                new_route.append(offset_point)
+                new_route.append(p2)
+        
+        route = new_route
         if all_safe:
             break
     
@@ -293,12 +391,20 @@ def create_map():
     
     # 绘制航线
     if st.session_state.current_route:
+        # 根据模式选择航线颜色
+        if st.session_state.route_mode == "left":
+            route_color = "#ff8800"
+        elif st.session_state.route_mode == "right":
+            route_color = "#aa66ff"
+        else:
+            route_color = "#00ff00"
+        
         folium.PolyLine(
             locations=st.session_state.current_route,
-            color="#00ff00",
+            color=route_color,
             weight=5,
             opacity=0.8,
-            popup=f"规划航线 | {len(st.session_state.current_route)}个航点"
+            popup=f"规划航线 | 模式: {st.session_state.route_mode} | {len(st.session_state.current_route)}个航点"
         ).add_to(m)
         
         for i, point in enumerate(st.session_state.current_route):
@@ -314,7 +420,8 @@ def create_map():
                 radius=5,
                 color=color,
                 fill=True,
-                popup=f"航点 {i+1}"
+                fill_opacity=0.8,
+                popup=f"航点 {i+1}\n({point[0]:.6f}, {point[1]:.6f})"
             ).add_to(m)
     
     return m
@@ -330,7 +437,7 @@ with tab1:
         if st.button("🎯 规划航线", use_container_width=True, type="primary"):
             plan_route()
             save_data()
-            st.success("航线规划完成！")
+            st.success(f"航线规划完成！模式: {st.session_state.route_mode}")
             st.rerun()
     with col_btn2:
         if st.button("💾 保存数据", use_container_width=True):
@@ -449,6 +556,27 @@ with tab1:
     
     with col2:
         st.subheader("⚙️ 参数设置")
+        
+        # 航线模式选择（三个选项）
+        st.markdown("### 🗺️ 绕行模式")
+        route_mode = st.radio(
+            "选择绕行策略",
+            options=["best", "left", "right"],
+            format_func=lambda x: {
+                "best": "🌟 最佳航线（智能选择最短路径）",
+                "left": "⬅️ 向左绕行", 
+                "right": "➡️ 向右绕行"
+            }[x],
+            horizontal=False,
+            index=["best", "left", "right"].index(st.session_state.route_mode)
+        )
+        if route_mode != st.session_state.route_mode:
+            st.session_state.route_mode = route_mode
+            st.session_state.current_route = []
+            save_data()
+            st.rerun()
+        
+        st.divider()
         
         # 坐标设置按钮
         st.markdown("### 🎯 坐标设置")
@@ -575,6 +703,10 @@ with tab1:
                 total_dist += calculate_distance(st.session_state.current_route[i], st.session_state.current_route[i+1])
             st.metric("总距离", f"{total_dist:.1f} m")
             st.metric("航点数", len(st.session_state.current_route))
+            
+            # 显示模式信息
+            mode_names = {"best": "🌟 最佳航线", "left": "⬅️ 向左绕行", "right": "➡️ 向右绕行"}
+            st.info(f"当前模式: {mode_names[st.session_state.route_mode]}")
 
 # ====================== 标签页2：飞行监控 ======================
 with tab2:
@@ -610,6 +742,10 @@ with tab2:
         st.subheader("📊 飞行状态")
         st.metric("飞行高度", f"{st.session_state.flight_altitude} m")
         st.metric("安全半径", f"{st.session_state.safety_radius} m")
+        
+        # 显示当前绕行模式
+        mode_names = {"best": "🌟 最佳航线", "left": "⬅️ 向左绕行", "right": "➡️ 向右绕行"}
+        st.metric("绕行模式", mode_names[st.session_state.route_mode])
         
         if st.session_state.obstacles:
             max_h = max([o.get("height", 0) for o in st.session_state.obstacles])
@@ -666,4 +802,4 @@ if st.session_state.heartbeat_running:
 
 # ====================== 页脚 ======================
 st.markdown("---")
-st.markdown("🚁 无人机航线规划系统 | 点击「设置起点/终点」→ 点击地图 → 绘制多边形 → 规划航线")
+st.markdown("🚁 无人机航线规划系统 | 三种绕行模式：向左绕行 ⬅️ | 向右绕行 ➡️ | 最佳航线 🌟")
