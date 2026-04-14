@@ -8,7 +8,6 @@ from datetime import datetime
 import pandas as pd
 import matplotlib.pyplot as plt
 import math
-from branca.element import Element
 
 # ====================== 页面配置 ======================
 st.set_page_config(
@@ -20,6 +19,7 @@ st.title("🚁 无人机航线规划与障碍物管理系统")
 
 # ====================== 配置文件 ======================
 CONFIG_FILE = "obstacle_config.json"
+PENDING_FILE = "pending_obstacle.json"
 
 # ====================== 初始化 ======================
 if "start_point" not in st.session_state:
@@ -40,10 +40,10 @@ if "current_route" not in st.session_state:
     st.session_state.current_route = []
 if "map_center" not in st.session_state:
     st.session_state.map_center = [32.2341, 118.7494]
-if "drag_start" not in st.session_state:
-    st.session_state.drag_start = None
-if "drag_end" not in st.session_state:
-    st.session_state.drag_end = None
+if "pending_polygon" not in st.session_state:
+    st.session_state.pending_polygon = None
+if "last_drawings" not in st.session_state:
+    st.session_state.last_drawings = None
 
 # ====================== 保存/加载 ======================
 def save_data():
@@ -222,7 +222,7 @@ def plan_route():
     
     st.session_state.current_route = route
 
-# ====================== 创建带拖拽事件的地图 ======================
+# ====================== 创建地图 ======================
 def create_map():
     m = folium.Map(
         location=st.session_state.map_center,
@@ -248,70 +248,73 @@ def create_map():
     )
     draw.add_to(m)
     
-    # 添加可拖拽的起点标记，并绑定事件
-    start_marker = folium.Marker(
+    # 起点标记
+    folium.Marker(
         location=st.session_state.start_point,
-        popup="🚁 起点 A (拖拽后自动更新)",
+        popup=f"🚁 起点 A\n{st.session_state.start_point[0]:.6f}, {st.session_state.start_point[1]:.6f}",
         icon=folium.Icon(color="red", icon="play", prefix="fa"),
-        draggable=True
-    )
-    start_marker.add_to(m)
+        draggable=False
+    ).add_to(m)
     
-    # 添加可拖拽的终点标记
-    end_marker = folium.Marker(
+    # 终点标记
+    folium.Marker(
         location=st.session_state.end_point,
-        popup="🎯 终点 B (拖拽后自动更新)",
+        popup=f"🎯 终点 B\n{st.session_state.end_point[0]:.6f}, {st.session_state.end_point[1]:.6f}",
         icon=folium.Icon(color="green", icon="flag-checkered", prefix="fa"),
-        draggable=True
-    )
-    end_marker.add_to(m)
+        draggable=False
+    ).add_to(m)
     
-    # 添加JavaScript来捕获拖拽事件并保存到session_state
-    # 注意：这个JavaScript会通过folium的HTML元素传递数据
-    drag_script = """
-    <script>
-    // 等待地图加载完成
-    setTimeout(function() {
-        var map = document.querySelector('.folium-map')._leaflet_map;
-        if (!map) return;
+    # 绘制所有障碍物
+    for i, obs in enumerate(st.session_state.obstacles):
+        polygon = obs.get("polygon", [])
+        height = obs.get("height", 10)
+        name = obs.get("name", f"障碍物{i+1}")
         
-        // 监听起点标记的拖拽事件
-        map.eachLayer(function(layer) {
-            if (layer instanceof L.Marker) {
-                var popup = layer.getPopup();
-                if (popup && popup.getContent()) {
-                    var content = popup.getContent();
-                    if (content.indexOf('起点') !== -1) {
-                        layer.on('dragend', function(e) {
-                            var latlng = e.target.getLatLng();
-                            console.log('起点拖拽到:', latlng.lat, latlng.lng);
-                            // 通过点击事件传递数据
-                            var event = new CustomEvent('marker_drag', {
-                                detail: {type: 'start', lat: latlng.lat, lng: latlng.lng}
-                            });
-                            window.dispatchEvent(event);
-                        });
-                    }
-                    if (content.indexOf('终点') !== -1) {
-                        layer.on('dragend', function(e) {
-                            var latlng = e.target.getLatLng();
-                            console.log('终点拖拽到:', latlng.lat, latlng.lng);
-                            var event = new CustomEvent('marker_drag', {
-                                detail: {type: 'end', lat: latlng.lat, lng: latlng.lng}
-                            });
-                            window.dispatchEvent(event);
-                        });
-                    }
-                }
-            }
-        });
-    }, 1000);
-    </script>
-    """
+        if polygon:
+            if height >= st.session_state.flight_altitude:
+                color = "#ff0000"
+                fill_opacity = 0.4
+                status = "⚠️ 需要绕行"
+            else:
+                color = "#00aa00"
+                fill_opacity = 0.2
+                status = "✅ 可飞越"
+            
+            folium.Polygon(
+                locations=polygon,
+                color=color,
+                weight=2,
+                fill=True,
+                fill_color=color,
+                fill_opacity=fill_opacity,
+                popup=f"📦 {name}\n📏 高度: {height}m\n{status}"
+            ).add_to(m)
     
-    # 添加一个隐藏的div来存储拖拽数据
-    hidden_div = Element('<div id="drag_data" style="display:none;"></div>')
-    hidden_div.add_to(m)
+    # 绘制航线
+    if st.session_state.current_route:
+        folium.PolyLine(
+            locations=st.session_state.current_route,
+            color="#00ff00",
+            weight=5,
+            opacity=0.8,
+            popup=f"规划航线 | {len(st.session_state.current_route)}个航点"
+        ).add_to(m)
+        
+        for i, point in enumerate(st.session_state.current_route):
+            if i == 0:
+                color = "red"
+            elif i == len(st.session_state.current_route) - 1:
+                color = "green"
+            else:
+                color = "orange"
+            
+            folium.CircleMarker(
+                location=point,
+                radius=5,
+                color=color,
+                fill=True,
+                popup=f"航点 {i+1}"
+            ).add_to(m)
     
     return m
 
@@ -321,7 +324,7 @@ tab1, tab2 = st.tabs(["🗺️ 地图与航线规划", "📡 飞行监控"])
 # ====================== 标签页1 ======================
 with tab1:
     # 按钮栏
-    col_btn1, col_btn2, col_btn3, col_btn4, col_btn5 = st.columns(5)
+    col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
     with col_btn1:
         if st.button("🎯 规划航线", use_container_width=True, type="primary"):
             plan_route()
@@ -339,12 +342,13 @@ with tab1:
             save_data()
             st.rerun()
     with col_btn4:
-        if st.button("🗺️ 重置地图", use_container_width=True):
+        if st.button("🗺️ 重置视图", use_container_width=True):
             st.session_state.map_center = [32.2341, 118.7494]
-            st.rerun()
-    with col_btn5:
-        if st.button("📏 测试碰撞", use_container_width=True):
-            plan_route()
+            st.session_state.start_point = (32.2345, 118.7492)
+            st.session_state.end_point = (32.2337, 118.7496)
+            st.session_state.obstacles = []
+            st.session_state.current_route = []
+            save_data()
             st.rerun()
     
     st.divider()
@@ -352,119 +356,128 @@ with tab1:
     col1, col2 = st.columns([3, 1])
     
     with col1:
-        st.subheader("🗺️ 地图（起点/终点可拖拽，绘制多边形添加障碍物）")
-        st.caption("💡 提示：直接拖拽红色/绿色标记可移动起点终点，然后点击「规划航线」")
+        st.subheader("🗺️ 地图（绘制多边形添加障碍物）")
+        st.caption("💡 提示：点击左侧🟦多边形工具，在地图上绘制障碍物区域")
         
-        # 创建地图
+        # 创建并显示地图
         m = create_map()
+        output = st_folium(m, width=850, height=550, returned_objects=["all_drawings"])
         
-        # 显示地图
-        output = st_folium(
-            m, 
-            width=850, 
-            height=550, 
-            returned_objects=["last_object_clicked", "all_drawings"]
-        )
-        
-        # 由于st_folium无法直接获取拖拽事件，我们使用侧边栏手动输入
-        # 同时提供一个"从地图获取"的按钮
-        
-        # 处理新绘制的多边形
+        # 处理新绘制的多边形 - 使用session_state避免重复
         if output and output.get("all_drawings"):
-            for drawing in output["all_drawings"]:
-                if drawing.get("geometry", {}).get("type") == "Polygon":
-                    coords = drawing["geometry"]["coordinates"][0]
-                    polygon_points = [[c[1], c[0]] for c in coords]
-                    
-                    with st.expander("➕ 添加新障碍物", expanded=True):
-                        obs_name = st.text_input("障碍物名称", value=f"障碍物_{len(st.session_state.obstacles)+1}")
-                        obs_height = st.number_input("高度（米）", min_value=0, max_value=100, value=10, step=1)
-                        
-                        col_a, col_b = st.columns(2)
-                        with col_a:
-                            if st.button("✅ 确认添加", use_container_width=True):
-                                new_obs = {
-                                    "name": obs_name,
-                                    "height": obs_height,
-                                    "polygon": polygon_points,
-                                    "create_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                }
-                                st.session_state.obstacles.append(new_obs)
-                                st.session_state.current_route = []
-                                save_data()
-                                st.success(f"已添加: {obs_name}")
-                                st.rerun()
-                        with col_b:
-                            if st.button("❌ 取消", use_container_width=True):
-                                st.rerun()
+            current_drawings = output["all_drawings"]
+            
+            # 检查是否有新绘制的多边形
+            if current_drawings != st.session_state.last_drawings:
+                st.session_state.last_drawings = current_drawings
+                
+                for drawing in current_drawings:
+                    if drawing.get("geometry", {}).get("type") == "Polygon":
+                        coords = drawing["geometry"]["coordinates"][0]
+                        polygon_points = [[c[1], c[0]] for c in coords]
+                        st.session_state.pending_polygon = polygon_points
+                        st.rerun()
+        
+        # 显示待添加障碍物的表单
+        if st.session_state.pending_polygon:
+            with st.container():
+                st.markdown("### ➕ 添加新障碍物")
+                st.info(f"多边形顶点数: {len(st.session_state.pending_polygon)}")
+                
+                col_form1, col_form2 = st.columns(2)
+                with col_form1:
+                    obs_name = st.text_input("障碍物名称", value=f"障碍物_{len(st.session_state.obstacles)+1}")
+                with col_form2:
+                    obs_height = st.number_input("高度（米）", min_value=0, max_value=100, value=10, step=1)
+                
+                col_btn_a, col_btn_b, col_btn_c = st.columns(3)
+                with col_btn_a:
+                    if st.button("✅ 确认添加", use_container_width=True, type="primary"):
+                        new_obs = {
+                            "name": obs_name,
+                            "height": obs_height,
+                            "polygon": st.session_state.pending_polygon,
+                            "create_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                        st.session_state.obstacles.append(new_obs)
+                        st.session_state.pending_polygon = None
+                        st.session_state.current_route = []
+                        save_data()
+                        st.success(f"✅ 已添加障碍物: {obs_name} (高度: {obs_height}m)")
+                        st.rerun()
+                with col_btn_b:
+                    if st.button("❌ 取消", use_container_width=True):
+                        st.session_state.pending_polygon = None
+                        st.rerun()
+                with col_btn_c:
+                    if st.button("🗑️ 清除所有绘制", use_container_width=True):
+                        st.session_state.pending_polygon = None
+                        st.session_state.last_drawings = None
+                        st.rerun()
     
     with col2:
         st.subheader("⚙️ 参数设置")
         
-        st.info("💡 提示：在地图上拖拽红色/绿色标记后，点击下方按钮同步坐标")
-        
-        # 起点设置（支持手动输入和从地图同步）
+        # 起点设置
         with st.expander("📍 起点设置", expanded=True):
             col_s1, col_s2 = st.columns(2)
             with col_s1:
-                new_start_lat = st.number_input("起点纬度", value=st.session_state.start_point[0], format="%.6f", key="start_lat")
+                new_start_lat = st.number_input("纬度", value=st.session_state.start_point[0], format="%.6f")
             with col_s2:
-                new_start_lng = st.number_input("起点经度", value=st.session_state.start_point[1], format="%.6f", key="start_lng")
+                new_start_lng = st.number_input("经度", value=st.session_state.start_point[1], format="%.6f")
             
-            col_s3, col_s4 = st.columns(2)
-            with col_s3:
-                if st.button("✈️ 更新起点", use_container_width=True):
-                    st.session_state.start_point = (new_start_lat, new_start_lng)
-                    st.session_state.current_route = []
-                    save_data()
-                    st.rerun()
-            with col_s4:
-                st.caption(f"当前: {st.session_state.start_point[0]:.6f}, {st.session_state.start_point[1]:.6f}")
+            if st.button("✈️ 更新起点", use_container_width=True):
+                st.session_state.start_point = (new_start_lat, new_start_lng)
+                st.session_state.current_route = []
+                save_data()
+                st.rerun()
+            
+            st.caption(f"当前: {st.session_state.start_point[0]:.6f}, {st.session_state.start_point[1]:.6f}")
         
         # 终点设置
         with st.expander("🏁 终点设置", expanded=True):
             col_e1, col_e2 = st.columns(2)
             with col_e1:
-                new_end_lat = st.number_input("终点纬度", value=st.session_state.end_point[0], format="%.6f", key="end_lat")
+                new_end_lat = st.number_input("纬度", value=st.session_state.end_point[0], format="%.6f")
             with col_e2:
-                new_end_lng = st.number_input("终点经度", value=st.session_state.end_point[1], format="%.6f", key="end_lng")
+                new_end_lng = st.number_input("经度", value=st.session_state.end_point[1], format="%.6f")
             
-            col_e3, col_e4 = st.columns(2)
-            with col_e3:
-                if st.button("🎯 更新终点", use_container_width=True):
-                    st.session_state.end_point = (new_end_lat, new_end_lng)
-                    st.session_state.current_route = []
-                    save_data()
-                    st.rerun()
-            with col_e4:
-                st.caption(f"当前: {st.session_state.end_point[0]:.6f}, {st.session_state.end_point[1]:.6f}")
+            if st.button("🎯 更新终点", use_container_width=True):
+                st.session_state.end_point = (new_end_lat, new_end_lng)
+                st.session_state.current_route = []
+                save_data()
+                st.rerun()
+            
+            st.caption(f"当前: {st.session_state.end_point[0]:.6f}, {st.session_state.end_point[1]:.6f}")
         
         st.divider()
         
-        # 快速坐标调整
-        with st.expander("🔧 快速调整", expanded=False):
-            st.caption("微调起点/终点位置")
-            col_q1, col_q2 = st.columns(2)
+        # 快速调整
+        with st.expander("🔧 快速微调", expanded=False):
+            st.caption("微调起点位置")
+            col_q1, col_q2, col_q3, col_q4 = st.columns(4)
             with col_q1:
-                if st.button("⬆️ 起点上移"):
+                if st.button("⬆️ 上移", key="up"):
                     lat, lng = st.session_state.start_point
-                    st.session_state.start_point = (lat + 0.0001, lng)
-                    st.session_state.current_route = []
-                    st.rerun()
-                if st.button("⬅️ 起点左移"):
-                    lat, lng = st.session_state.start_point
-                    st.session_state.start_point = (lat, lng - 0.0001)
+                    st.session_state.start_point = (lat + 0.00005, lng)
                     st.session_state.current_route = []
                     st.rerun()
             with col_q2:
-                if st.button("⬇️ 起点下移"):
+                if st.button("⬇️ 下移", key="down"):
                     lat, lng = st.session_state.start_point
-                    st.session_state.start_point = (lat - 0.0001, lng)
+                    st.session_state.start_point = (lat - 0.00005, lng)
                     st.session_state.current_route = []
                     st.rerun()
-                if st.button("➡️ 起点右移"):
+            with col_q3:
+                if st.button("⬅️ 左移", key="left"):
                     lat, lng = st.session_state.start_point
-                    st.session_state.start_point = (lat, lng + 0.0001)
+                    st.session_state.start_point = (lat, lng - 0.00005)
+                    st.session_state.current_route = []
+                    st.rerun()
+            with col_q4:
+                if st.button("➡️ 右移", key="right"):
+                    lat, lng = st.session_state.start_point
+                    st.session_state.start_point = (lat, lng + 0.00005)
                     st.session_state.current_route = []
                     st.rerun()
         
@@ -516,7 +529,7 @@ with tab1:
         # 障碍物列表
         if st.session_state.obstacles:
             for i, obs in enumerate(st.session_state.obstacles):
-                col_a, col_b = st.columns([3, 1])
+                col_a, col_b, col_c = st.columns([3, 1, 1])
                 with col_a:
                     height = obs.get('height', 0)
                     name = obs.get('name', '未知')
@@ -527,6 +540,9 @@ with tab1:
                         st.markdown(f"**🟢 {name}**")
                         st.caption(f"📏 {height}m (可飞越)")
                 with col_b:
+                    if st.button("✏️", key=f"edit_{i}"):
+                        st.info("编辑功能开发中")
+                with col_c:
                     if st.button("🗑️", key=f"del_{i}"):
                         st.session_state.obstacles.pop(i)
                         st.session_state.current_route = []
@@ -545,7 +561,11 @@ with tab1:
                 total_dist += calculate_distance(st.session_state.current_route[i], st.session_state.current_route[i+1])
             st.metric("总距离", f"{total_dist:.1f} m")
             st.metric("航点数", len(st.session_state.current_route))
-            st.caption(f"起点 → {len(st.session_state.current_route)-2}个中间点 → 终点")
+            
+            # 显示航线详情
+            with st.expander("📋 航线详情"):
+                for i, point in enumerate(st.session_state.current_route):
+                    st.text(f"航点 {i+1}: ({point[0]:.6f}, {point[1]:.6f})")
 
 # ====================== 标签页2：飞行监控 ======================
 with tab2:
@@ -637,4 +657,4 @@ if st.session_state.heartbeat_running:
 
 # ====================== 页脚 ======================
 st.markdown("---")
-st.markdown("🚁 无人机航线规划系统 | 手动输入坐标或使用快速调整按钮 → 点击「规划航线」→ 绿色航线自动绕行")
+st.markdown("🚁 无人机航线规划系统 | 绘制多边形 → 填写高度 → 点击规划航线")
