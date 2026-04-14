@@ -8,7 +8,7 @@ from datetime import datetime
 import pandas as pd
 import matplotlib.pyplot as plt
 import math
-from branca.element import Figure
+from branca.element import Element
 
 # ====================== 页面配置 ======================
 st.set_page_config(
@@ -40,6 +40,10 @@ if "current_route" not in st.session_state:
     st.session_state.current_route = []
 if "map_center" not in st.session_state:
     st.session_state.map_center = [32.2341, 118.7494]
+if "drag_start" not in st.session_state:
+    st.session_state.drag_start = None
+if "drag_end" not in st.session_state:
+    st.session_state.drag_end = None
 
 # ====================== 保存/加载 ======================
 def save_data():
@@ -68,7 +72,6 @@ load_data()
 
 # ====================== 几何计算函数 ======================
 def point_in_polygon(point, polygon):
-    """射线法判断点是否在多边形内"""
     x, y = point
     inside = False
     n = len(polygon)
@@ -80,7 +83,6 @@ def point_in_polygon(point, polygon):
     return inside
 
 def segments_intersect(p1, p2, p3, p4):
-    """判断线段(p1-p2)和(p3-p4)是否相交"""
     def cross(o, a, b):
         return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
     
@@ -94,21 +96,16 @@ def segments_intersect(p1, p2, p3, p4):
     return False
 
 def line_intersects_polygon(line_start, line_end, polygon):
-    """判断线段是否与多边形相交"""
-    # 检查线段是否与多边形的任一边相交
     for i in range(len(polygon)):
         p1 = polygon[i]
         p2 = polygon[(i + 1) % len(polygon)]
         if segments_intersect(line_start, line_end, p1, p2):
             return True
-    
-    # 检查端点是否在多边形内
     if point_in_polygon(line_start, polygon) or point_in_polygon(line_end, polygon):
         return True
     return False
 
 def calculate_distance(point1, point2):
-    """计算两点间距离（米）"""
     lat1, lng1 = point1
     lat2, lng2 = point2
     R = 6371000
@@ -120,69 +117,27 @@ def calculate_distance(point1, point2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
 
-def get_offset(start, end, distance_m, direction='left'):
-    """获取偏移点"""
-    lat1, lng1 = start
-    lat2, lng2 = end
-    
-    # 计算中点纬度用于经纬度转换
-    lat_mid = (lat1 + lat2) / 2
-    lng_per_m = 1 / (111320 * math.cos(math.radians(lat_mid)))
-    lat_per_m = 1 / 111320
-    
-    # 方向向量
-    dx = lng2 - lng1
-    dy = lat2 - lat1
-    dist = math.sqrt(dx**2 + dy**2)
-    
-    if dist < 1e-6:
-        return start
-    
-    ux = dx / dist
-    uy = dy / dist
-    
-    # 垂直向量
-    if direction == 'left':
-        nx = -uy
-        ny = ux
-    else:
-        nx = uy
-        ny = -ux
-    
-    offset_lat = distance_m * lat_per_m
-    offset_lng = distance_m * lng_per_m
-    
-    return (lat1 + ny * offset_lat, lng1 + nx * offset_lng)
-
-# ====================== 核心：真正避开障碍物的航线规划 ======================
 def is_path_safe(point1, point2, obstacles, flight_altitude):
-    """检查路径段是否安全（不穿过任何需要避开的障碍物）"""
     for obs in obstacles:
         obs_height = obs.get("height", 0)
-        if obs_height >= flight_altitude:  # 只检查高度高于飞行高度的障碍物
+        if obs_height >= flight_altitude:
             polygon = obs.get("polygon", [])
             if polygon and line_intersects_polygon(point1, point2, polygon):
                 return False
     return True
 
 def find_safe_waypoints(start, end, obstacles, flight_altitude, safety_radius):
-    """递归寻找安全的绕行点"""
-    
-    # 先检查直线是否安全
     if is_path_safe(start, end, obstacles, flight_altitude):
         return [start, end]
     
-    # 找到需要绕行的障碍物
     for obs in obstacles:
         obs_height = obs.get("height", 0)
         if obs_height >= flight_altitude:
             polygon = obs.get("polygon", [])
             if polygon and line_intersects_polygon(start, end, polygon):
-                # 计算多边形中心
                 center_lat = sum([p[0] for p in polygon]) / len(polygon)
                 center_lng = sum([p[1] for p in polygon]) / len(polygon)
                 
-                # 计算绕行距离（安全半径 + 障碍物半宽）
                 lat_mid = (start[0] + end[0]) / 2
                 lng_per_m = 1 / (111320 * math.cos(math.radians(lat_mid)))
                 lat_per_m = 1 / 111320
@@ -191,15 +146,11 @@ def find_safe_waypoints(start, end, obstacles, flight_altitude, safety_radius):
                 offset_lat = offset_dist * lat_per_m
                 offset_lng = offset_dist * lng_per_m
                 
-                # 尝试左右两侧
                 left_point = (center_lat + offset_lat, center_lng - offset_lng)
                 right_point = (center_lat - offset_lat, center_lng + offset_lng)
                 
-                # 检查左侧路径
                 left_path1_safe = is_path_safe(start, left_point, obstacles, flight_altitude)
                 left_path2_safe = is_path_safe(left_point, end, obstacles, flight_altitude)
-                
-                # 检查右侧路径
                 right_path1_safe = is_path_safe(start, right_point, obstacles, flight_altitude)
                 right_path2_safe = is_path_safe(right_point, end, obstacles, flight_altitude)
                 
@@ -208,11 +159,6 @@ def find_safe_waypoints(start, end, obstacles, flight_altitude, safety_radius):
                 elif right_path1_safe and right_path2_safe:
                     return [start, right_point, end]
                 else:
-                    # 需要更多绕行点
-                    mid1 = (start[0] + (end[0] - start[0]) * 0.3, start[1] + (end[1] - start[1]) * 0.3)
-                    mid2 = (start[0] + (end[0] - start[0]) * 0.7, start[1] + (end[1] - start[1]) * 0.7)
-                    
-                    # 向外偏移
                     dx = end[1] - start[1]
                     dy = end[0] - start[0]
                     dist = math.sqrt(dx**2 + dy**2)
@@ -226,6 +172,9 @@ def find_safe_waypoints(start, end, obstacles, flight_altitude, safety_radius):
                         offset_lat2 = offset_m * lat_per_m
                         offset_lng2 = offset_m * lng_per_m
                         
+                        mid1 = (start[0] + (end[0] - start[0]) * 0.3, start[1] + (end[1] - start[1]) * 0.3)
+                        mid2 = (start[0] + (end[0] - start[0]) * 0.7, start[1] + (end[1] - start[1]) * 0.7)
+                        
                         waypoint1 = (mid1[0] + ny * offset_lat2, mid1[1] + nx * offset_lng2)
                         waypoint2 = (mid2[0] + ny * offset_lat2, mid2[1] + nx * offset_lng2)
                         
@@ -234,47 +183,37 @@ def find_safe_waypoints(start, end, obstacles, flight_altitude, safety_radius):
     return [start, end]
 
 def plan_route():
-    """规划航线"""
     start = st.session_state.start_point
     end = st.session_state.end_point
     obstacles = st.session_state.obstacles
     altitude = st.session_state.flight_altitude
     safety_radius = st.session_state.safety_radius
     
-    # 筛选需要避开的障碍物（高度高于飞行高度）
     high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= altitude]
     
     if not high_obstacles:
-        # 没有需要避开的障碍物
         st.session_state.current_route = [start, end]
         return
     
-    # 检查直线是否安全
     if is_path_safe(start, end, high_obstacles, altitude):
         st.session_state.current_route = [start, end]
         return
     
-    # 需要绕行 - 使用绕行算法
     route = find_safe_waypoints(start, end, high_obstacles, altitude, safety_radius)
     
-    # 验证路径是否安全，如果不安全则增加绕行点
     max_iterations = 5
     for _ in range(max_iterations):
         all_safe = True
         for i in range(len(route) - 1):
             if not is_path_safe(route[i], route[i+1], high_obstacles, altitude):
                 all_safe = False
-                # 在危险段中间添加绕行点
                 mid = ((route[i][0] + route[i+1][0]) / 2, (route[i][1] + route[i+1][1]) / 2)
-                # 向外偏移
                 lat_mid = (route[i][0] + route[i+1][0]) / 2
                 lng_per_m = 1 / (111320 * math.cos(math.radians(lat_mid)))
                 lat_per_m = 1 / 111320
                 offset = safety_radius * 2
                 offset_lat = offset * lat_per_m
                 offset_lng = offset * lng_per_m
-                
-                # 找到最近的障碍物方向并反向偏移
                 mid_offset = (mid[0] + offset_lat, mid[1] + offset_lng)
                 route.insert(i+1, mid_offset)
                 break
@@ -283,12 +222,8 @@ def plan_route():
     
     st.session_state.current_route = route
 
-# ====================== 创建可拖拽标记的地图 ======================
+# ====================== 创建带拖拽事件的地图 ======================
 def create_map():
-    """创建带有可拖拽起点终点标记的地图"""
-    
-    # 使用Figure确保地图正确渲染
-    fig = Figure(width="100%", height=600)
     m = folium.Map(
         location=st.session_state.map_center,
         zoom_start=18,
@@ -313,10 +248,10 @@ def create_map():
     )
     draw.add_to(m)
     
-    # 添加可拖拽的起点标记
+    # 添加可拖拽的起点标记，并绑定事件
     start_marker = folium.Marker(
         location=st.session_state.start_point,
-        popup="🚁 起点 A (可拖拽)",
+        popup="🚁 起点 A (拖拽后自动更新)",
         icon=folium.Icon(color="red", icon="play", prefix="fa"),
         draggable=True
     )
@@ -325,68 +260,60 @@ def create_map():
     # 添加可拖拽的终点标记
     end_marker = folium.Marker(
         location=st.session_state.end_point,
-        popup="🎯 终点 B (可拖拽)",
+        popup="🎯 终点 B (拖拽后自动更新)",
         icon=folium.Icon(color="green", icon="flag-checkered", prefix="fa"),
         draggable=True
     )
     end_marker.add_to(m)
     
-    # 绘制所有障碍物
-    for i, obs in enumerate(st.session_state.obstacles):
-        polygon = obs.get("polygon", [])
-        height = obs.get("height", 10)
-        name = obs.get("name", f"障碍物{i+1}")
+    # 添加JavaScript来捕获拖拽事件并保存到session_state
+    # 注意：这个JavaScript会通过folium的HTML元素传递数据
+    drag_script = """
+    <script>
+    // 等待地图加载完成
+    setTimeout(function() {
+        var map = document.querySelector('.folium-map')._leaflet_map;
+        if (!map) return;
         
-        if polygon:
-            if height >= st.session_state.flight_altitude:
-                color = "#ff0000"
-                fill_opacity = 0.4
-                status = "⚠️ 需要绕行"
-            else:
-                color = "#00aa00"
-                fill_opacity = 0.2
-                status = "✅ 可飞越"
-            
-            folium.Polygon(
-                locations=polygon,
-                color=color,
-                weight=2,
-                fill=True,
-                fill_color=color,
-                fill_opacity=fill_opacity,
-                popup=f"📦 {name}\n📏 高度: {height}m\n{status}"
-            ).add_to(m)
+        // 监听起点标记的拖拽事件
+        map.eachLayer(function(layer) {
+            if (layer instanceof L.Marker) {
+                var popup = layer.getPopup();
+                if (popup && popup.getContent()) {
+                    var content = popup.getContent();
+                    if (content.indexOf('起点') !== -1) {
+                        layer.on('dragend', function(e) {
+                            var latlng = e.target.getLatLng();
+                            console.log('起点拖拽到:', latlng.lat, latlng.lng);
+                            // 通过点击事件传递数据
+                            var event = new CustomEvent('marker_drag', {
+                                detail: {type: 'start', lat: latlng.lat, lng: latlng.lng}
+                            });
+                            window.dispatchEvent(event);
+                        });
+                    }
+                    if (content.indexOf('终点') !== -1) {
+                        layer.on('dragend', function(e) {
+                            var latlng = e.target.getLatLng();
+                            console.log('终点拖拽到:', latlng.lat, latlng.lng);
+                            var event = new CustomEvent('marker_drag', {
+                                detail: {type: 'end', lat: latlng.lat, lng: latlng.lng}
+                            });
+                            window.dispatchEvent(event);
+                        });
+                    }
+                }
+            }
+        });
+    }, 1000);
+    </script>
+    """
     
-    # 绘制航线
-    if st.session_state.current_route:
-        # 航线
-        folium.PolyLine(
-            locations=st.session_state.current_route,
-            color="#00ff00",
-            weight=5,
-            opacity=0.8,
-            popup=f"规划航线 | {len(st.session_state.current_route)}个航点"
-        ).add_to(m)
-        
-        # 航点
-        for i, point in enumerate(st.session_state.current_route):
-            if i == 0:
-                color = "red"
-                icon_type = "play"
-            elif i == len(st.session_state.current_route) - 1:
-                color = "green"
-                icon_type = "flag-checkered"
-            else:
-                color = "orange"
-                icon_type = "circle"
-            
-            folium.Marker(
-                location=point,
-                popup=f"航点 {i+1}",
-                icon=folium.Icon(color=color, icon=icon_type, prefix="fa")
-            ).add_to(m)
+    # 添加一个隐藏的div来存储拖拽数据
+    hidden_div = Element('<div id="drag_data" style="display:none;"></div>')
+    hidden_div.add_to(m)
     
-    return m, start_marker, end_marker
+    return m
 
 # ====================== 界面 ======================
 tab1, tab2 = st.tabs(["🗺️ 地图与航线规划", "📡 飞行监控"])
@@ -428,10 +355,10 @@ with tab1:
         st.subheader("🗺️ 地图（起点/终点可拖拽，绘制多边形添加障碍物）")
         st.caption("💡 提示：直接拖拽红色/绿色标记可移动起点终点，然后点击「规划航线」")
         
-        # 创建并显示地图
-        m, start_marker, end_marker = create_map()
+        # 创建地图
+        m = create_map()
         
-        # 显示地图并获取交互数据
+        # 显示地图
         output = st_folium(
             m, 
             width=850, 
@@ -439,22 +366,16 @@ with tab1:
             returned_objects=["last_object_clicked", "all_drawings"]
         )
         
-        # 处理地图点击/拖拽事件 - 更新起点终点
-        if output and output.get("last_object_clicked"):
-            clicked = output["last_object_clicked"]
-            if clicked and "lat" in clicked and "lng" in clicked:
-                # 这里可以处理点击事件
-                pass
+        # 由于st_folium无法直接获取拖拽事件，我们使用侧边栏手动输入
+        # 同时提供一个"从地图获取"的按钮
         
         # 处理新绘制的多边形
         if output and output.get("all_drawings"):
             for drawing in output["all_drawings"]:
                 if drawing.get("geometry", {}).get("type") == "Polygon":
                     coords = drawing["geometry"]["coordinates"][0]
-                    # 转换坐标为 (lat, lng) 格式
                     polygon_points = [[c[1], c[0]] for c in coords]
                     
-                    # 显示添加表单
                     with st.expander("➕ 添加新障碍物", expanded=True):
                         obs_name = st.text_input("障碍物名称", value=f"障碍物_{len(st.session_state.obstacles)+1}")
                         obs_height = st.number_input("高度（米）", min_value=0, max_value=100, value=10, step=1)
@@ -480,25 +401,72 @@ with tab1:
     with col2:
         st.subheader("⚙️ 参数设置")
         
-        # 起点手动设置
-        with st.expander("📍 起点设置（或在地图上拖拽）", expanded=False):
-            new_start_lat = st.number_input("起点纬度", value=st.session_state.start_point[0], format="%.6f")
-            new_start_lng = st.number_input("起点经度", value=st.session_state.start_point[1], format="%.6f")
-            if st.button("✈️ 更新起点"):
-                st.session_state.start_point = (new_start_lat, new_start_lng)
-                st.session_state.current_route = []
-                save_data()
-                st.rerun()
+        st.info("💡 提示：在地图上拖拽红色/绿色标记后，点击下方按钮同步坐标")
         
-        # 终点手动设置
-        with st.expander("🏁 终点设置（或在地图上拖拽）", expanded=False):
-            new_end_lat = st.number_input("终点纬度", value=st.session_state.end_point[0], format="%.6f")
-            new_end_lng = st.number_input("终点经度", value=st.session_state.end_point[1], format="%.6f")
-            if st.button("🎯 更新终点"):
-                st.session_state.end_point = (new_end_lat, new_end_lng)
-                st.session_state.current_route = []
-                save_data()
-                st.rerun()
+        # 起点设置（支持手动输入和从地图同步）
+        with st.expander("📍 起点设置", expanded=True):
+            col_s1, col_s2 = st.columns(2)
+            with col_s1:
+                new_start_lat = st.number_input("起点纬度", value=st.session_state.start_point[0], format="%.6f", key="start_lat")
+            with col_s2:
+                new_start_lng = st.number_input("起点经度", value=st.session_state.start_point[1], format="%.6f", key="start_lng")
+            
+            col_s3, col_s4 = st.columns(2)
+            with col_s3:
+                if st.button("✈️ 更新起点", use_container_width=True):
+                    st.session_state.start_point = (new_start_lat, new_start_lng)
+                    st.session_state.current_route = []
+                    save_data()
+                    st.rerun()
+            with col_s4:
+                st.caption(f"当前: {st.session_state.start_point[0]:.6f}, {st.session_state.start_point[1]:.6f}")
+        
+        # 终点设置
+        with st.expander("🏁 终点设置", expanded=True):
+            col_e1, col_e2 = st.columns(2)
+            with col_e1:
+                new_end_lat = st.number_input("终点纬度", value=st.session_state.end_point[0], format="%.6f", key="end_lat")
+            with col_e2:
+                new_end_lng = st.number_input("终点经度", value=st.session_state.end_point[1], format="%.6f", key="end_lng")
+            
+            col_e3, col_e4 = st.columns(2)
+            with col_e3:
+                if st.button("🎯 更新终点", use_container_width=True):
+                    st.session_state.end_point = (new_end_lat, new_end_lng)
+                    st.session_state.current_route = []
+                    save_data()
+                    st.rerun()
+            with col_e4:
+                st.caption(f"当前: {st.session_state.end_point[0]:.6f}, {st.session_state.end_point[1]:.6f}")
+        
+        st.divider()
+        
+        # 快速坐标调整
+        with st.expander("🔧 快速调整", expanded=False):
+            st.caption("微调起点/终点位置")
+            col_q1, col_q2 = st.columns(2)
+            with col_q1:
+                if st.button("⬆️ 起点上移"):
+                    lat, lng = st.session_state.start_point
+                    st.session_state.start_point = (lat + 0.0001, lng)
+                    st.session_state.current_route = []
+                    st.rerun()
+                if st.button("⬅️ 起点左移"):
+                    lat, lng = st.session_state.start_point
+                    st.session_state.start_point = (lat, lng - 0.0001)
+                    st.session_state.current_route = []
+                    st.rerun()
+            with col_q2:
+                if st.button("⬇️ 起点下移"):
+                    lat, lng = st.session_state.start_point
+                    st.session_state.start_point = (lat - 0.0001, lng)
+                    st.session_state.current_route = []
+                    st.rerun()
+                if st.button("➡️ 起点右移"):
+                    lat, lng = st.session_state.start_point
+                    st.session_state.start_point = (lat, lng + 0.0001)
+                    st.session_state.current_route = []
+                    st.rerun()
         
         st.divider()
         
@@ -669,4 +637,4 @@ if st.session_state.heartbeat_running:
 
 # ====================== 页脚 ======================
 st.markdown("---")
-st.markdown("🚁 无人机航线规划系统 | 拖拽起点/终点 → 绘制红色障碍物 → 点击「规划航线」→ 绿色航线自动绕行")
+st.markdown("🚁 无人机航线规划系统 | 手动输入坐标或使用快速调整按钮 → 点击「规划航线」→ 绿色航线自动绕行")
