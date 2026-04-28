@@ -79,6 +79,8 @@ load_data()
 # ====================== 几何计算函数 ======================
 def point_in_polygon(point, polygon):
     """射线法判断点是否在多边形内"""
+    if not polygon or len(polygon) < 3:
+        return False
     x, y = point
     inside = False
     n = len(polygon)
@@ -105,11 +107,15 @@ def segments_intersect(p1, p2, p3, p4):
 
 def line_intersects_polygon(line_start, line_end, polygon):
     """判断线段是否与多边形相交"""
+    if not polygon or len(polygon) < 3:
+        return False
+    # 检查是否与任何边相交
     for i in range(len(polygon)):
         p1 = polygon[i]
         p2 = polygon[(i + 1) % len(polygon)]
         if segments_intersect(line_start, line_end, p1, p2):
             return True
+    # 检查端点是否在多边形内
     if point_in_polygon(line_start, polygon) or point_in_polygon(line_end, polygon):
         return True
     return False
@@ -129,24 +135,35 @@ def calculate_distance(point1, point2):
 
 def get_bounding_box(polygon):
     """获取多边形边界框"""
+    if not polygon:
+        return 0, 0, 0, 0
     lats = [p[0] for p in polygon]
     lngs = [p[1] for p in polygon]
     return min(lats), max(lats), min(lngs), max(lngs)
 
 def get_expanded_point(start, end, polygon, safety_radius, direction='left'):
     """获取绕过障碍物的偏移点"""
+    if not polygon or len(polygon) < 3:
+        return ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
+    
+    # 获取多边形中心
     center_lat = sum([p[0] for p in polygon]) / len(polygon)
     center_lng = sum([p[1] for p in polygon]) / len(polygon)
     
+    # 获取多边形边界框尺寸
     min_lat, max_lat, min_lng, max_lng = get_bounding_box(polygon)
     poly_width_lat = (max_lat - min_lat) * 111320
     poly_width_lng = (max_lng - min_lng) * 111320 * math.cos(math.radians(center_lat))
     poly_size = max(poly_width_lat, poly_width_lng)
     
-    offset_dist = (poly_size / 2) + safety_radius
+    # 计算偏移距离（障碍物半宽 + 安全半径）
+    offset_dist = max((poly_size / 2) + safety_radius, safety_radius + 5)
     
+    # 计算方向
     lat_mid = (start[0] + end[0]) / 2
-    lng_per_m = 1 / (111320 * math.cos(math.radians(lat_mid)))
+    if abs(lat_mid) > 85:
+        lat_mid = 32.0
+    lng_per_m = 1 / (111320 * math.cos(math.radians(lat_mid))) if abs(math.cos(math.radians(lat_mid))) > 0.01 else 0.00001
     lat_per_m = 1 / 111320
     
     dx = end[1] - start[1]
@@ -174,11 +191,16 @@ def get_expanded_point(start, end, polygon, safety_radius, direction='left'):
 def find_obstacle_on_path(start, end, obstacles, flight_altitude):
     """找到路径上的第一个障碍物"""
     for obs in obstacles:
+        # 安全获取高度，默认为0
         obs_height = obs.get("height", 0)
-        if obs_height >= flight_altitude:
+        if isinstance(obs_height, (int, float)) and obs_height >= flight_altitude:
             polygon = obs.get("polygon", [])
-            if polygon and line_intersects_polygon(start, end, polygon):
-                return obs
+            if polygon and len(polygon) >= 3:
+                try:
+                    if line_intersects_polygon(start, end, polygon):
+                        return obs
+                except Exception:
+                    continue
     return None
 
 def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
@@ -186,19 +208,40 @@ def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
     waypoints = [start]
     current_start = start
     remaining_obstacles = obstacles.copy()
+    used_obstacles = set()
     
-    max_iterations = 10
+    max_iterations = 20
     for _ in range(max_iterations):
+        # 找到当前路径上的障碍物
         obs = find_obstacle_on_path(current_start, end, remaining_obstacles, flight_altitude)
         if obs is None:
             waypoints.append(end)
             break
         
+        # 避免重复处理同一个障碍物导致无限循环
+        obs_id = id(obs)
+        if obs_id in used_obstacles:
+            # 如果还是同一个障碍物，直接添加终点
+            waypoints.append(end)
+            break
+        used_obstacles.add(obs_id)
+        
+        # 获取左侧绕行点
         polygon = obs.get("polygon", [])
+        if not polygon:
+            waypoints.append(end)
+            break
+            
         bypass_point = get_expanded_point(current_start, end, polygon, safety_radius, 'left')
         waypoints.append(bypass_point)
         current_start = bypass_point
+        
+        # 从绕行点继续
         remaining_obstacles = [o for o in remaining_obstacles if o != obs]
+    
+    # 确保终点被添加
+    if waypoints[-1] != end:
+        waypoints.append(end)
     
     return waypoints
 
@@ -207,19 +250,38 @@ def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
     waypoints = [start]
     current_start = start
     remaining_obstacles = obstacles.copy()
+    used_obstacles = set()
     
-    max_iterations = 10
+    max_iterations = 20
     for _ in range(max_iterations):
+        # 找到当前路径上的障碍物
         obs = find_obstacle_on_path(current_start, end, remaining_obstacles, flight_altitude)
         if obs is None:
             waypoints.append(end)
             break
         
+        # 避免重复处理同一个障碍物导致无限循环
+        obs_id = id(obs)
+        if obs_id in used_obstacles:
+            waypoints.append(end)
+            break
+        used_obstacles.add(obs_id)
+        
+        # 获取右侧绕行点
         polygon = obs.get("polygon", [])
+        if not polygon:
+            waypoints.append(end)
+            break
+            
         bypass_point = get_expanded_point(current_start, end, polygon, safety_radius, 'right')
         waypoints.append(bypass_point)
         current_start = bypass_point
+        
+        # 从绕行点继续
         remaining_obstacles = [o for o in remaining_obstacles if o != obs]
+    
+    if waypoints[-1] != end:
+        waypoints.append(end)
     
     return waypoints
 
@@ -228,6 +290,7 @@ def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
     left_route = plan_route_left(start, end, obstacles, flight_altitude, safety_radius)
     right_route = plan_route_right(start, end, obstacles, flight_altitude, safety_radius)
     
+    # 计算路径长度
     left_dist = 0
     for i in range(len(left_route) - 1):
         left_dist += calculate_distance(left_route[i], left_route[i+1])
@@ -236,35 +299,61 @@ def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
     for i in range(len(right_route) - 1):
         right_dist += calculate_distance(right_route[i], right_route[i+1])
     
+    # 返回较短的路径
     return left_route if left_dist <= right_dist else right_route
 
 def plan_route():
     """规划航线主函数"""
-    start = st.session_state.start_point
-    end = st.session_state.end_point
-    obstacles = st.session_state.obstacles
-    altitude = st.session_state.flight_altitude
-    safety_radius = st.session_state.safety_radius
-    mode = st.session_state.route_mode
-    
-    high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= altitude]
-    
-    if not high_obstacles:
-        st.session_state.current_route = [start, end]
-        return
-    
-    if find_obstacle_on_path(start, end, high_obstacles, altitude) is None:
-        st.session_state.current_route = [start, end]
-        return
-    
-    if mode == "left":
-        route = plan_route_left(start, end, high_obstacles, altitude, safety_radius)
-    elif mode == "right":
-        route = plan_route_right(start, end, high_obstacles, altitude, safety_radius)
-    else:
-        route = plan_route_best(start, end, high_obstacles, altitude, safety_radius)
-    
-    st.session_state.current_route = route
+    try:
+        start = st.session_state.start_point
+        end = st.session_state.end_point
+        obstacles = st.session_state.obstacles
+        altitude = st.session_state.flight_altitude
+        safety_radius = st.session_state.safety_radius
+        mode = st.session_state.route_mode
+        
+        # 验证起点和终点
+        if not start or not end or len(start) != 2 or len(end) != 2:
+            st.session_state.current_route = []
+            return
+        
+        # 筛选需要避开的障碍物（高度高于飞行高度）
+        high_obstacles = []
+        for obs in obstacles:
+            obs_height = obs.get("height", 0)
+            if isinstance(obs_height, (int, float)) and obs_height >= altitude:
+                polygon = obs.get("polygon", [])
+                if polygon and len(polygon) >= 3:
+                    high_obstacles.append(obs)
+        
+        # 如果没有需要避开的障碍物，直接返回直线
+        if not high_obstacles:
+            st.session_state.current_route = [start, end]
+            return
+        
+        # 检查直线是否安全
+        if find_obstacle_on_path(start, end, high_obstacles, altitude) is None:
+            st.session_state.current_route = [start, end]
+            return
+        
+        # 根据模式选择绕行算法
+        if mode == "left":
+            route = plan_route_left(start, end, high_obstacles, altitude, safety_radius)
+        elif mode == "right":
+            route = plan_route_right(start, end, high_obstacles, altitude, safety_radius)
+        else:  # best
+            route = plan_route_best(start, end, high_obstacles, altitude, safety_radius)
+        
+        # 确保路线有效
+        if route and len(route) >= 2:
+            st.session_state.current_route = route
+        else:
+            st.session_state.current_route = [start, end]
+            
+    except Exception as e:
+        # 如果规划失败，使用直线作为后备方案
+        st.session_state.current_route = [st.session_state.start_point, st.session_state.end_point]
+        print(f"规划航线时出错: {e}")
 
 # ====================== 创建地图 ======================
 def create_map():
@@ -275,6 +364,7 @@ def create_map():
         attr="高德地图"
     )
     
+    # 添加绘图工具
     draw = Draw(
         draw_options={
             "polygon": {
@@ -291,6 +381,7 @@ def create_map():
     )
     draw.add_to(m)
     
+    # 起点标记
     folium.Marker(
         location=st.session_state.start_point,
         popup=f"🚁 起点 A\n{st.session_state.start_point[0]:.6f}, {st.session_state.start_point[1]:.6f}",
@@ -298,6 +389,7 @@ def create_map():
         draggable=False
     ).add_to(m)
     
+    # 终点标记
     folium.Marker(
         location=st.session_state.end_point,
         popup=f"🎯 终点 B\n{st.session_state.end_point[0]:.6f}, {st.session_state.end_point[1]:.6f}",
@@ -305,12 +397,13 @@ def create_map():
         draggable=False
     ).add_to(m)
     
+    # 绘制所有障碍物
     for i, obs in enumerate(st.session_state.obstacles):
         polygon = obs.get("polygon", [])
         height = obs.get("height", 10)
         name = obs.get("name", f"障碍物{i+1}")
         
-        if polygon:
+        if polygon and len(polygon) >= 3:
             if height >= st.session_state.flight_altitude:
                 color = "#ff0000"
                 fill_opacity = 0.4
@@ -330,7 +423,9 @@ def create_map():
                 popup=f"📦 {name}\n📏 高度: {height}m\n{status}"
             ).add_to(m)
     
-    if st.session_state.current_route:
+    # 绘制航线
+    if st.session_state.current_route and len(st.session_state.current_route) >= 2:
+        # 根据模式选择航线颜色
         if st.session_state.route_mode == "left":
             route_color = "#ff8800"
         elif st.session_state.route_mode == "right":
@@ -370,6 +465,7 @@ tab1, tab2 = st.tabs(["🗺️ 地图与航线规划", "📡 飞行监控"])
 
 # ====================== 标签页1 ======================
 with tab1:
+    # 按钮栏
     col_btn1, col_btn2, col_btn3, col_btn4, col_btn5 = st.columns(5)
     with col_btn1:
         if st.button("🎯 规划航线", use_container_width=True, type="primary"):
@@ -405,6 +501,7 @@ with tab1:
     
     st.divider()
     
+    # 坐标设置模式提示
     if st.session_state.set_mode == 'start':
         st.info("🔴 当前模式：设置起点 - 请点击地图上的位置")
     elif st.session_state.set_mode == 'end':
@@ -416,9 +513,11 @@ with tab1:
         st.subheader("🗺️ 地图")
         st.caption("💡 提示：点击下方按钮进入坐标设置模式，然后点击地图设置起点/终点")
         
+        # 创建并显示地图
         m = create_map()
         output = st_folium(m, width=850, height=550, returned_objects=["last_clicked", "all_drawings"])
         
+        # 处理地图点击事件（用于设置起点/终点）
         if output and output.get("last_clicked"):
             clicked = output["last_clicked"]
             if clicked and "lat" in clicked and "lng" in clicked:
@@ -439,6 +538,7 @@ with tab1:
                     st.success(f"✅ 终点已设置为: ({lat:.6f}, {lng:.6f})")
                     st.rerun()
         
+        # 处理新绘制的多边形
         if output and output.get("all_drawings"):
             current_drawings = output["all_drawings"]
             
@@ -452,6 +552,7 @@ with tab1:
                         st.session_state.pending_polygon = polygon_points
                         st.rerun()
         
+        # 显示待添加障碍物的表单
         if st.session_state.pending_polygon:
             with st.container():
                 st.markdown("### ➕ 添加新障碍物")
@@ -491,6 +592,7 @@ with tab1:
     with col2:
         st.subheader("⚙️ 参数设置")
         
+        # 航线模式选择（三个选项）
         st.markdown("### 🗺️ 绕行模式")
         
         mode_names = {
@@ -514,6 +616,7 @@ with tab1:
         
         st.divider()
         
+        # 坐标设置按钮
         st.markdown("### 🎯 坐标设置")
         st.caption("点击下方按钮后，再点击地图上的位置")
         
@@ -529,12 +632,13 @@ with tab1:
         
         st.divider()
         
+        # 起点手动输入
         with st.expander("📍 起点手动输入", expanded=False):
             col_s1, col_s2 = st.columns(2)
             with col_s1:
-                new_start_lat = st.number_input("纬度", value=st.session_state.start_point[0], format="%.6f")
+                new_start_lat = st.number_input("纬度", value=float(st.session_state.start_point[0]), format="%.6f")
             with col_s2:
-                new_start_lng = st.number_input("经度", value=st.session_state.start_point[1], format="%.6f")
+                new_start_lng = st.number_input("经度", value=float(st.session_state.start_point[1]), format="%.6f")
             
             if st.button("✈️ 更新起点", use_container_width=True):
                 st.session_state.start_point = (new_start_lat, new_start_lng)
@@ -544,12 +648,13 @@ with tab1:
             
             st.caption(f"当前: {st.session_state.start_point[0]:.6f}, {st.session_state.start_point[1]:.6f}")
         
+        # 终点手动输入
         with st.expander("🏁 终点手动输入", expanded=False):
             col_e1, col_e2 = st.columns(2)
             with col_e1:
-                new_end_lat = st.number_input("纬度", value=st.session_state.end_point[0], format="%.6f")
+                new_end_lat = st.number_input("纬度", value=float(st.session_state.end_point[0]), format="%.6f")
             with col_e2:
-                new_end_lng = st.number_input("经度", value=st.session_state.end_point[1], format="%.6f")
+                new_end_lng = st.number_input("经度", value=float(st.session_state.end_point[1]), format="%.6f")
             
             if st.button("🎯 更新终点", use_container_width=True):
                 st.session_state.end_point = (new_end_lat, new_end_lng)
@@ -561,6 +666,7 @@ with tab1:
         
         st.divider()
         
+        # 飞行参数
         new_altitude = st.number_input(
             "✈️ 飞行高度（米）",
             min_value=0.0,
@@ -589,6 +695,7 @@ with tab1:
         
         st.divider()
         
+        # 障碍物统计
         st.subheader(f"📦 障碍物 ({len(st.session_state.obstacles)})")
         
         high_obs = [o for o in st.session_state.obstacles if o.get("height", 0) >= st.session_state.flight_altitude]
@@ -602,6 +709,7 @@ with tab1:
         
         st.divider()
         
+        # 障碍物列表
         if st.session_state.obstacles:
             for i, obs in enumerate(st.session_state.obstacles):
                 col_a, col_b = st.columns([4, 1])
@@ -624,7 +732,8 @@ with tab1:
         else:
             st.info("📭 暂无障碍物，请在地图上绘制多边形")
         
-        if st.session_state.current_route:
+        # 航线信息
+        if st.session_state.current_route and len(st.session_state.current_route) >= 2:
             st.divider()
             st.subheader("📊 航线信息")
             total_dist = 0
@@ -633,6 +742,7 @@ with tab1:
             st.metric("总距离", f"{total_dist:.1f} m")
             st.metric("航点数", len(st.session_state.current_route))
             
+            # 显示模式信息
             mode_display = {"best": "🌟 最佳航线", "left": "⬅️ 向左绕行", "right": "➡️ 向右绕行"}
             st.info(f"当前模式: {mode_display[st.session_state.route_mode]}")
 
@@ -698,35 +808,4 @@ with tab2:
             ax.plot(range(1, len(seq_list)+1), seq_list, marker='o', color='#2ecc71', linewidth=2)
             ax.set_xlabel("心跳次数")
             ax.set_ylabel("序列号")
-            ax.set_title("无人机心跳序列")
-            ax.grid(True, alpha=0.3)
-            st.pyplot(fig)
-
-# ====================== 自动心跳 ======================
-if st.session_state.heartbeat_running:
-    import time
-    if len(st.session_state.heartbeat_history) > 0:
-        last_time_str = st.session_state.heartbeat_history[-1]["time"]
-        last_time = datetime.strptime(last_time_str, "%H:%M:%S")
-        now = datetime.now()
-        if (now - last_time).total_seconds() >= 2:
-            new_seq = len(st.session_state.heartbeat_history) + 1
-            st.session_state.heartbeat_history.append({
-                "seq": new_seq,
-                "time": now.strftime("%H:%M:%S"),
-                "status": "正常"
-            })
-            time.sleep(0.1)
-            st.rerun()
-    elif len(st.session_state.heartbeat_history) == 0:
-        st.session_state.heartbeat_history.append({
-            "seq": 1,
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "status": "正常"
-        })
-        time.sleep(0.1)
-        st.rerun()
-
-# ====================== 页脚 ======================
-st.markdown("---")
-st.markdown("🚁 无人机航线规划系统 | 三种绕行模式：向左绕行 ⬅️ | 向右绕行 ➡️ | 最佳航线 🌟")
+            ax.set_title("无人机心跳
