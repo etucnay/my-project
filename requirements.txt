@@ -1,7 +1,6 @@
-streamlit>=1.30.0
-folium>=0.15.0
-folium==0.17.0
-pandas>=2.0.0
-matplotlib>=3.7.0
-numpy>=1.24.0
-coordtransform>=0.2.7
+streamlit
+folium
+streamlit-folium
+pandas
+matplotlib
+numpy
