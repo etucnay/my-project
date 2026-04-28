@@ -123,49 +123,109 @@ def calculate_distance(point1, point2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
 
-def get_bounding_box(polygon):
+def get_polygon_bounds(polygon):
+    """获取多边形的边界"""
     lats = [p[0] for p in polygon]
     lngs = [p[1] for p in polygon]
     return min(lats), max(lats), min(lngs), max(lngs)
 
-def get_expanded_point(start, end, polygon, safety_radius, direction='left'):
-    center_lat = sum([p[0] for p in polygon]) / len(polygon)
-    center_lng = sum([p[1] for p in polygon]) / len(polygon)
+def get_polygon_vertices_at_y(polygon, y, is_left=True):
+    """获取多边形在给定纬度上的左右边界经度"""
+    intersections = []
+    n = len(polygon)
+    for i in range(n):
+        p1 = polygon[i]
+        p2 = polygon[(i + 1) % n]
+        y1, x1 = p1
+        y2, x2 = p2
+        
+        if (y1 <= y <= y2) or (y2 <= y <= y1):
+            if y1 != y2:
+                t = (y - y1) / (y2 - y1)
+                x = x1 + t * (x2 - x1)
+                intersections.append(x)
     
-    min_lat, max_lat, min_lng, max_lng = get_bounding_box(polygon)
+    if len(intersections) >= 2:
+        intersections.sort()
+        if is_left:
+            return intersections[0]
+        else:
+            return intersections[-1]
+    return None
+
+def get_bypass_points_around_polygon(start, end, polygon, safety_radius, side='left'):
+    """真正绕过多边形 - 生成多边形两侧的绕行点"""
+    min_lat, max_lat, min_lng, max_lng = get_polygon_bounds(polygon)
+    
+    # 计算多边形中心
+    center_lat = (min_lat + max_lat) / 2
+    center_lng = (min_lng + max_lng) / 2
+    
+    # 计算多边形尺寸（米）
+    lat_mid = center_lat
+    lng_per_m = 1 / (111320 * math.cos(math.radians(lat_mid)))
+    lat_per_m = 1 / 111320
+    
     poly_width_lat = (max_lat - min_lat) * 111320
     poly_width_lng = (max_lng - min_lng) * 111320 * math.cos(math.radians(center_lat))
     poly_size = max(poly_width_lat, poly_width_lng)
     
-    offset_dist = (poly_size / 2) + safety_radius
+    # 绕行距离 = 多边形半宽 + 安全半径 + 额外余量
+    bypass_dist = poly_size / 2 + safety_radius * 1.5
+    offset_lat = bypass_dist * lat_per_m
+    offset_lng = bypass_dist * lng_per_m
     
-    lat_mid = (start[0] + end[0]) / 2
+    if side == 'left':
+        # 左侧绕行：从多边形左侧经过
+        bypass_lng = min_lng - offset_lng
+        # 生成绕行点：起点方向 -> 左侧绕过 -> 终点方向
+        point1 = (start[0], bypass_lng)
+        point2 = (end[0], bypass_lng)
+    else:
+        # 右侧绕行：从多边形右侧经过
+        bypass_lng = max_lng + offset_lng
+        point1 = (start[0], bypass_lng)
+        point2 = (end[0], bypass_lng)
+    
+    return [point1, point2]
+
+def get_corner_bypass_points(start, end, polygon, safety_radius, side='left'):
+    """从角落绕过 - 生成矩形绕行路径"""
+    min_lat, max_lat, min_lng, max_lng = get_polygon_bounds(polygon)
+    
+    lat_mid = (min_lat + max_lat) / 2
     lng_per_m = 1 / (111320 * math.cos(math.radians(lat_mid)))
     lat_per_m = 1 / 111320
     
-    dx = end[1] - start[1]
-    dy = end[0] - start[0]
-    dist = math.sqrt(dx**2 + dy**2)
+    offset = safety_radius * 1.5
+    offset_lat = offset * lat_per_m
+    offset_lng = offset * lng_per_m
     
-    if dist < 1e-6:
-        return (center_lat + offset_dist * lat_per_m, center_lng)
+    # 扩展边界
+    ext_min_lat = min_lat - offset_lat
+    ext_max_lat = max_lat + offset_lat
+    ext_min_lng = min_lng - offset_lng
+    ext_max_lng = max_lng + offset_lng
     
-    ux = dx / dist
-    uy = dy / dist
-    
-    if direction == 'left':
-        nx = -uy
-        ny = ux
+    if side == 'left':
+        # 从左上角或左下角绕过
+        if start[0] < end[0]:
+            # 起点在上方，从左上角绕过
+            corner = (ext_min_lat, ext_min_lng)
+        else:
+            # 起点在下方，从左下角绕过
+            corner = (ext_max_lat, ext_min_lng)
     else:
-        nx = uy
-        ny = -ux
+        # 从右上角或右下角绕过
+        if start[0] < end[0]:
+            corner = (ext_min_lat, ext_max_lng)
+        else:
+            corner = (ext_max_lat, ext_max_lng)
     
-    offset_lat = offset_dist * lat_per_m
-    offset_lng = offset_dist * lng_per_m
-    
-    return (center_lat + ny * offset_lat, center_lng + nx * offset_lng)
+    return [corner]
 
 def find_obstacle_on_path(start, end, obstacles, flight_altitude):
+    """找到路径上的第一个障碍物"""
     for obs in obstacles:
         obs_height = obs.get("height", 0)
         if obs_height >= flight_altitude:
@@ -175,44 +235,56 @@ def find_obstacle_on_path(start, end, obstacles, flight_altitude):
     return None
 
 def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
+    """左侧绕行 - 完全从左侧绕过所有障碍物"""
     waypoints = [start]
     current_start = start
     remaining_obstacles = obstacles.copy()
     
-    for _ in range(10):
+    max_iterations = 10
+    for _ in range(max_iterations):
         obs = find_obstacle_on_path(current_start, end, remaining_obstacles, flight_altitude)
         if obs is None:
             waypoints.append(end)
             break
         
         polygon = obs.get("polygon", [])
-        bypass_point = get_expanded_point(current_start, end, polygon, safety_radius, 'left')
-        waypoints.append(bypass_point)
-        current_start = bypass_point
+        # 获取绕行点（从多边形左侧绕过）
+        bypass_points = get_bypass_points_around_polygon(current_start, end, polygon, safety_radius, 'left')
+        
+        for point in bypass_points:
+            waypoints.append(point)
+            current_start = point
+        
         remaining_obstacles = [o for o in remaining_obstacles if o != obs]
     
     return waypoints
 
 def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
+    """右侧绕行 - 完全从右侧绕过所有障碍物"""
     waypoints = [start]
     current_start = start
     remaining_obstacles = obstacles.copy()
     
-    for _ in range(10):
+    max_iterations = 10
+    for _ in range(max_iterations):
         obs = find_obstacle_on_path(current_start, end, remaining_obstacles, flight_altitude)
         if obs is None:
             waypoints.append(end)
             break
         
         polygon = obs.get("polygon", [])
-        bypass_point = get_expanded_point(current_start, end, polygon, safety_radius, 'right')
-        waypoints.append(bypass_point)
-        current_start = bypass_point
+        bypass_points = get_bypass_points_around_polygon(current_start, end, polygon, safety_radius, 'right')
+        
+        for point in bypass_points:
+            waypoints.append(point)
+            current_start = point
+        
         remaining_obstacles = [o for o in remaining_obstacles if o != obs]
     
     return waypoints
 
 def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
+    """最佳航线 - 尝试左右并选择较短路径"""
     left_route = plan_route_left(start, end, obstacles, flight_altitude, safety_radius)
     right_route = plan_route_right(start, end, obstacles, flight_altitude, safety_radius)
     
@@ -227,6 +299,7 @@ def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
     return left_route if left_dist <= right_dist else right_route
 
 def plan_route():
+    """规划航线主函数"""
     start = st.session_state.start_point
     end = st.session_state.end_point
     obstacles = st.session_state.obstacles
@@ -251,7 +324,19 @@ def plan_route():
     else:
         route = plan_route_best(start, end, high_obstacles, altitude, safety_radius)
     
-    st.session_state.current_route = route
+    # 简化路径：移除共线的中间点
+    simplified = [route[0]]
+    for i in range(1, len(route) - 1):
+        if not is_collinear(simplified[-1], route[i], route[i+1]):
+            simplified.append(route[i])
+    simplified.append(route[-1])
+    
+    st.session_state.current_route = simplified
+
+def is_collinear(p1, p2, p3, tolerance=1e-8):
+    """判断三点是否共线"""
+    area = (p2[0] - p1[0]) * (p3[1] - p1[1]) - (p2[1] - p1[1]) * (p3[0] - p1[0])
+    return abs(area) < tolerance
 
 # ====================== 创建地图 ======================
 def create_map():
@@ -401,7 +486,6 @@ with tab1:
         m = create_map()
         output = st_folium(m, width=850, height=550, returned_objects=["last_clicked", "all_drawings"])
         
-        # 处理地图点击事件（不自动rerun，避免循环）
         if output and output.get("last_clicked"):
             clicked = output["last_clicked"]
             if clicked and "lat" in clicked:
@@ -423,7 +507,6 @@ with tab1:
                         save_data()
                         st.toast(f"✅ 终点已设置: ({lat:.6f}, {lng:.6f})", icon="✅")
         
-        # 处理新绘制的多边形
         if output and output.get("all_drawings"):
             drawings = output["all_drawings"]
             if len(drawings) > 0:
@@ -433,9 +516,6 @@ with tab1:
                     polygon_points = [[c[1], c[0]] for c in coords]
                     if st.session_state.pending_polygon != polygon_points:
                         st.session_state.pending_polygon = polygon_points
-        
-        # 显示待添加障碍物的表单（使用key避免重复）
-        pending_key = f"pending_{len(st.session_state.pending_polygon) if st.session_state.pending_polygon else 0}"
         
         if st.session_state.pending_polygon:
             with st.container():
@@ -502,7 +582,6 @@ with tab1:
         
         st.divider()
         
-        # 起点手动输入
         with st.expander("📍 起点手动输入", expanded=False):
             col_s1, col_s2 = st.columns(2)
             with col_s1:
@@ -518,7 +597,6 @@ with tab1:
             
             st.caption(f"当前: {st.session_state.start_point[0]:.6f}, {st.session_state.start_point[1]:.6f}")
         
-        # 终点手动输入
         with st.expander("🏁 终点手动输入", expanded=False):
             col_e1, col_e2 = st.columns(2)
             with col_e1:
