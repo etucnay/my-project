@@ -8,7 +8,6 @@ from datetime import datetime
 import pandas as pd
 import matplotlib.pyplot as plt
 import math
-import numpy as np
 
 # ====================== 页面配置 ======================
 st.set_page_config(
@@ -16,12 +15,13 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
 st.title("🚁 无人机航线规划与障碍物管理系统")
 
 # ====================== 配置文件 ======================
 CONFIG_FILE = "obstacle_config.json"
 
-# ====================== 初始化 ======================
+# ====================== 初始化 Session State ======================
 if "start_point" not in st.session_state:
     st.session_state.start_point = (32.2345, 118.7492)
 if "end_point" not in st.session_state:
@@ -42,12 +42,12 @@ if "map_center" not in st.session_state:
     st.session_state.map_center = [32.2341, 118.7494]
 if "pending_polygon" not in st.session_state:
     st.session_state.pending_polygon = None
-if "last_drawings" not in st.session_state:
-    st.session_state.last_drawings = None
 if "set_mode" not in st.session_state:
     st.session_state.set_mode = None
 if "route_mode" not in st.session_state:
     st.session_state.route_mode = "best"
+if "last_click" not in st.session_state:
+    st.session_state.last_click = None
 
 # ====================== 保存/加载 ======================
 def save_data():
@@ -78,7 +78,6 @@ load_data()
 
 # ====================== 几何计算函数 ======================
 def point_in_polygon(point, polygon):
-    """射线法判断点是否在多边形内"""
     x, y = point
     inside = False
     n = len(polygon)
@@ -90,7 +89,6 @@ def point_in_polygon(point, polygon):
     return inside
 
 def segments_intersect(p1, p2, p3, p4):
-    """判断线段是否相交"""
     def cross(o, a, b):
         return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
     
@@ -104,20 +102,16 @@ def segments_intersect(p1, p2, p3, p4):
     return False
 
 def line_intersects_polygon(line_start, line_end, polygon):
-    """判断线段是否与多边形相交"""
-    # 检查是否与任何边相交
     for i in range(len(polygon)):
         p1 = polygon[i]
         p2 = polygon[(i + 1) % len(polygon)]
         if segments_intersect(line_start, line_end, p1, p2):
             return True
-    # 检查端点是否在多边形内
     if point_in_polygon(line_start, polygon) or point_in_polygon(line_end, polygon):
         return True
     return False
 
 def calculate_distance(point1, point2):
-    """计算两点间距离（米）"""
     lat1, lng1 = point1
     lat2, lng2 = point2
     R = 6371000
@@ -130,32 +124,25 @@ def calculate_distance(point1, point2):
     return R * c
 
 def get_bounding_box(polygon):
-    """获取多边形边界框"""
     lats = [p[0] for p in polygon]
     lngs = [p[1] for p in polygon]
     return min(lats), max(lats), min(lngs), max(lngs)
 
 def get_expanded_point(start, end, polygon, safety_radius, direction='left'):
-    """获取绕过障碍物的偏移点"""
-    # 获取多边形中心
     center_lat = sum([p[0] for p in polygon]) / len(polygon)
     center_lng = sum([p[1] for p in polygon]) / len(polygon)
     
-    # 获取多边形边界框尺寸
     min_lat, max_lat, min_lng, max_lng = get_bounding_box(polygon)
     poly_width_lat = (max_lat - min_lat) * 111320
     poly_width_lng = (max_lng - min_lng) * 111320 * math.cos(math.radians(center_lat))
     poly_size = max(poly_width_lat, poly_width_lng)
     
-    # 计算偏移距离（障碍物半宽 + 安全半径）
     offset_dist = (poly_size / 2) + safety_radius
     
-    # 计算方向
     lat_mid = (start[0] + end[0]) / 2
     lng_per_m = 1 / (111320 * math.cos(math.radians(lat_mid)))
     lat_per_m = 1 / 111320
     
-    # 起点到终点的方向向量
     dx = end[1] - start[1]
     dy = end[0] - start[0]
     dist = math.sqrt(dx**2 + dy**2)
@@ -166,7 +153,6 @@ def get_expanded_point(start, end, polygon, safety_radius, direction='left'):
     ux = dx / dist
     uy = dy / dist
     
-    # 垂直向量
     if direction == 'left':
         nx = -uy
         ny = ux
@@ -177,11 +163,9 @@ def get_expanded_point(start, end, polygon, safety_radius, direction='left'):
     offset_lat = offset_dist * lat_per_m
     offset_lng = offset_dist * lng_per_m
     
-    # 返回偏移点
     return (center_lat + ny * offset_lat, center_lng + nx * offset_lng)
 
 def find_obstacle_on_path(start, end, obstacles, flight_altitude):
-    """找到路径上的第一个障碍物"""
     for obs in obstacles:
         obs_height = obs.get("height", 0)
         if obs_height >= flight_altitude:
@@ -191,61 +175,47 @@ def find_obstacle_on_path(start, end, obstacles, flight_altitude):
     return None
 
 def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
-    """左侧绕行规划"""
     waypoints = [start]
     current_start = start
     remaining_obstacles = obstacles.copy()
     
-    max_iterations = 10
-    for _ in range(max_iterations):
-        # 找到当前路径上的障碍物
+    for _ in range(10):
         obs = find_obstacle_on_path(current_start, end, remaining_obstacles, flight_altitude)
         if obs is None:
             waypoints.append(end)
             break
         
-        # 获取左侧绕行点
         polygon = obs.get("polygon", [])
         bypass_point = get_expanded_point(current_start, end, polygon, safety_radius, 'left')
         waypoints.append(bypass_point)
         current_start = bypass_point
-        
-        # 从绕行点继续
         remaining_obstacles = [o for o in remaining_obstacles if o != obs]
     
     return waypoints
 
 def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
-    """右侧绕行规划"""
     waypoints = [start]
     current_start = start
     remaining_obstacles = obstacles.copy()
     
-    max_iterations = 10
-    for _ in range(max_iterations):
-        # 找到当前路径上的障碍物
+    for _ in range(10):
         obs = find_obstacle_on_path(current_start, end, remaining_obstacles, flight_altitude)
         if obs is None:
             waypoints.append(end)
             break
         
-        # 获取右侧绕行点
         polygon = obs.get("polygon", [])
         bypass_point = get_expanded_point(current_start, end, polygon, safety_radius, 'right')
         waypoints.append(bypass_point)
         current_start = bypass_point
-        
-        # 从绕行点继续
         remaining_obstacles = [o for o in remaining_obstacles if o != obs]
     
     return waypoints
 
 def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
-    """最佳航线 - 尝试左右并选择较短路径"""
     left_route = plan_route_left(start, end, obstacles, flight_altitude, safety_radius)
     right_route = plan_route_right(start, end, obstacles, flight_altitude, safety_radius)
     
-    # 计算路径长度
     left_dist = 0
     for i in range(len(left_route) - 1):
         left_dist += calculate_distance(left_route[i], left_route[i+1])
@@ -254,14 +224,9 @@ def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
     for i in range(len(right_route) - 1):
         right_dist += calculate_distance(right_route[i], right_route[i+1])
     
-    # 返回较短的路径
-    if left_dist <= right_dist:
-        return left_route
-    else:
-        return right_route
+    return left_route if left_dist <= right_dist else right_route
 
 def plan_route():
-    """规划航线主函数"""
     start = st.session_state.start_point
     end = st.session_state.end_point
     obstacles = st.session_state.obstacles
@@ -269,25 +234,21 @@ def plan_route():
     safety_radius = st.session_state.safety_radius
     mode = st.session_state.route_mode
     
-    # 筛选需要避开的障碍物（高度高于飞行高度）
     high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= altitude]
     
-    # 如果没有需要避开的障碍物，直接返回直线
     if not high_obstacles:
         st.session_state.current_route = [start, end]
         return
     
-    # 检查直线是否安全
     if find_obstacle_on_path(start, end, high_obstacles, altitude) is None:
         st.session_state.current_route = [start, end]
         return
     
-    # 根据模式选择绕行算法
     if mode == "left":
         route = plan_route_left(start, end, high_obstacles, altitude, safety_radius)
     elif mode == "right":
         route = plan_route_right(start, end, high_obstacles, altitude, safety_radius)
-    else:  # best
+    else:
         route = plan_route_best(start, end, high_obstacles, altitude, safety_radius)
     
     st.session_state.current_route = route
@@ -301,7 +262,6 @@ def create_map():
         attr="高德地图"
     )
     
-    # 添加绘图工具
     draw = Draw(
         draw_options={
             "polygon": {
@@ -318,23 +278,18 @@ def create_map():
     )
     draw.add_to(m)
     
-    # 起点标记
     folium.Marker(
         location=st.session_state.start_point,
         popup=f"🚁 起点 A\n{st.session_state.start_point[0]:.6f}, {st.session_state.start_point[1]:.6f}",
-        icon=folium.Icon(color="red", icon="play", prefix="fa"),
-        draggable=False
+        icon=folium.Icon(color="red", icon="play", prefix="fa")
     ).add_to(m)
     
-    # 终点标记
     folium.Marker(
         location=st.session_state.end_point,
         popup=f"🎯 终点 B\n{st.session_state.end_point[0]:.6f}, {st.session_state.end_point[1]:.6f}",
-        icon=folium.Icon(color="green", icon="flag-checkered", prefix="fa"),
-        draggable=False
+        icon=folium.Icon(color="green", icon="flag-checkered", prefix="fa")
     ).add_to(m)
     
-    # 绘制所有障碍物
     for i, obs in enumerate(st.session_state.obstacles):
         polygon = obs.get("polygon", [])
         height = obs.get("height", 10)
@@ -360,9 +315,7 @@ def create_map():
                 popup=f"📦 {name}\n📏 高度: {height}m\n{status}"
             ).add_to(m)
     
-    # 绘制航线
     if st.session_state.current_route:
-        # 根据模式选择航线颜色
         if st.session_state.route_mode == "left":
             route_color = "#ff8800"
         elif st.session_state.route_mode == "right":
@@ -375,7 +328,7 @@ def create_map():
             color=route_color,
             weight=5,
             opacity=0.8,
-            popup=f"规划航线 | 模式: {st.session_state.route_mode} | {len(st.session_state.current_route)}个航点"
+            popup=f"规划航线 | 模式: {st.session_state.route_mode}"
         ).add_to(m)
         
         for i, point in enumerate(st.session_state.current_route):
@@ -392,7 +345,7 @@ def create_map():
                 color=color,
                 fill=True,
                 fill_opacity=0.8,
-                popup=f"航点 {i+1}\n({point[0]:.6f}, {point[1]:.6f})"
+                popup=f"航点 {i+1}"
             ).add_to(m)
     
     return m
@@ -402,15 +355,12 @@ tab1, tab2 = st.tabs(["🗺️ 地图与航线规划", "📡 飞行监控"])
 
 # ====================== 标签页1 ======================
 with tab1:
-    # 按钮栏
     col_btn1, col_btn2, col_btn3, col_btn4, col_btn5 = st.columns(5)
     with col_btn1:
         if st.button("🎯 规划航线", use_container_width=True, type="primary"):
             plan_route()
             save_data()
-            mode_names = {"best": "最佳航线", "left": "向左绕行", "right": "向右绕行"}
-            st.success(f"航线规划完成！模式: {mode_names[st.session_state.route_mode]}")
-            st.rerun()
+            st.success("航线规划完成！")
     with col_btn2:
         if st.button("💾 保存数据", use_container_width=True):
             save_data()
@@ -420,7 +370,7 @@ with tab1:
             st.session_state.obstacles = []
             st.session_state.current_route = []
             save_data()
-            st.rerun()
+            st.success("已清空")
     with col_btn4:
         if st.button("🗺️ 重置视图", use_container_width=True):
             st.session_state.map_center = [32.2341, 118.7494]
@@ -429,16 +379,14 @@ with tab1:
             st.session_state.obstacles = []
             st.session_state.current_route = []
             save_data()
-            st.rerun()
+            st.success("已重置")
     with col_btn5:
         if st.button("❌ 取消模式", use_container_width=True):
             st.session_state.set_mode = None
             st.success("已退出坐标设置模式")
-            st.rerun()
     
     st.divider()
     
-    # 坐标设置模式提示
     if st.session_state.set_mode == 'start':
         st.info("🔴 当前模式：设置起点 - 请点击地图上的位置")
     elif st.session_state.set_mode == 'end':
@@ -450,46 +398,45 @@ with tab1:
         st.subheader("🗺️ 地图")
         st.caption("💡 提示：点击下方按钮进入坐标设置模式，然后点击地图设置起点/终点")
         
-        # 创建并显示地图
         m = create_map()
         output = st_folium(m, width=850, height=550, returned_objects=["last_clicked", "all_drawings"])
         
-        # 处理地图点击事件（用于设置起点/终点）
+        # 处理地图点击事件（不自动rerun，避免循环）
         if output and output.get("last_clicked"):
             clicked = output["last_clicked"]
-            if clicked and "lat" in clicked and "lng" in clicked:
-                lat, lng = clicked["lat"], clicked["lng"]
-                
-                if st.session_state.set_mode == 'start':
-                    st.session_state.start_point = (lat, lng)
-                    st.session_state.current_route = []
-                    st.session_state.set_mode = None
-                    save_data()
-                    st.success(f"✅ 起点已设置为: ({lat:.6f}, {lng:.6f})")
-                    st.rerun()
-                elif st.session_state.set_mode == 'end':
-                    st.session_state.end_point = (lat, lng)
-                    st.session_state.current_route = []
-                    st.session_state.set_mode = None
-                    save_data()
-                    st.success(f"✅ 终点已设置为: ({lat:.6f}, {lng:.6f})")
-                    st.rerun()
+            if clicked and "lat" in clicked:
+                current_click = (clicked["lat"], clicked["lng"])
+                if current_click != st.session_state.last_click:
+                    st.session_state.last_click = current_click
+                    lat, lng = current_click
+                    
+                    if st.session_state.set_mode == 'start':
+                        st.session_state.start_point = (lat, lng)
+                        st.session_state.current_route = []
+                        st.session_state.set_mode = None
+                        save_data()
+                        st.toast(f"✅ 起点已设置: ({lat:.6f}, {lng:.6f})", icon="✅")
+                    elif st.session_state.set_mode == 'end':
+                        st.session_state.end_point = (lat, lng)
+                        st.session_state.current_route = []
+                        st.session_state.set_mode = None
+                        save_data()
+                        st.toast(f"✅ 终点已设置: ({lat:.6f}, {lng:.6f})", icon="✅")
         
         # 处理新绘制的多边形
         if output and output.get("all_drawings"):
-            current_drawings = output["all_drawings"]
-            
-            if current_drawings != st.session_state.last_drawings:
-                st.session_state.last_drawings = current_drawings
-                
-                for drawing in current_drawings:
-                    if drawing.get("geometry", {}).get("type") == "Polygon":
-                        coords = drawing["geometry"]["coordinates"][0]
-                        polygon_points = [[c[1], c[0]] for c in coords]
+            drawings = output["all_drawings"]
+            if len(drawings) > 0:
+                last_drawing = drawings[-1]
+                if last_drawing.get("geometry", {}).get("type") == "Polygon":
+                    coords = last_drawing["geometry"]["coordinates"][0]
+                    polygon_points = [[c[1], c[0]] for c in coords]
+                    if st.session_state.pending_polygon != polygon_points:
                         st.session_state.pending_polygon = polygon_points
-                        st.rerun()
         
-        # 显示待添加障碍物的表单
+        # 显示待添加障碍物的表单（使用key避免重复）
+        pending_key = f"pending_{len(st.session_state.pending_polygon) if st.session_state.pending_polygon else 0}"
+        
         if st.session_state.pending_polygon:
             with st.container():
                 st.markdown("### ➕ 添加新障碍物")
@@ -497,13 +444,13 @@ with tab1:
                 
                 col_form1, col_form2 = st.columns(2)
                 with col_form1:
-                    obs_name = st.text_input("障碍物名称", value=f"障碍物_{len(st.session_state.obstacles)+1}")
+                    obs_name = st.text_input("障碍物名称", value=f"障碍物_{len(st.session_state.obstacles)+1}", key="obs_name")
                 with col_form2:
-                    obs_height = st.number_input("高度（米）", min_value=0, max_value=100, value=10, step=1)
+                    obs_height = st.number_input("高度（米）", min_value=0, max_value=100, value=10, step=1, key="obs_height")
                 
-                col_btn_a, col_btn_b, col_btn_c = st.columns(3)
+                col_btn_a, col_btn_b = st.columns(2)
                 with col_btn_a:
-                    if st.button("✅ 确认添加", use_container_width=True, type="primary"):
+                    if st.button("✅ 确认添加", use_container_width=True, key="confirm_add"):
                         new_obs = {
                             "name": obs_name,
                             "height": obs_height,
@@ -514,58 +461,44 @@ with tab1:
                         st.session_state.pending_polygon = None
                         st.session_state.current_route = []
                         save_data()
-                        st.success(f"✅ 已添加障碍物: {obs_name} (高度: {obs_height}m)")
+                        st.success(f"✅ 已添加障碍物: {obs_name}")
                         st.rerun()
                 with col_btn_b:
-                    if st.button("❌ 取消", use_container_width=True):
+                    if st.button("❌ 取消", use_container_width=True, key="cancel_add"):
                         st.session_state.pending_polygon = None
-                        st.rerun()
-                with col_btn_c:
-                    if st.button("🗑️ 清除所有绘制", use_container_width=True):
-                        st.session_state.pending_polygon = None
-                        st.session_state.last_drawings = None
                         st.rerun()
     
     with col2:
         st.subheader("⚙️ 参数设置")
         
-        # 航线模式选择（三个选项）
         st.markdown("### 🗺️ 绕行模式")
-        
-        mode_names = {
-            "best": "🌟 最佳航线（智能选择最短路径）",
-            "left": "⬅️ 向左绕行", 
-            "right": "➡️ 向右绕行"
-        }
         
         selected_mode = st.radio(
             "选择绕行策略",
             options=["best", "left", "right"],
-            format_func=lambda x: mode_names[x],
-            horizontal=False,
-            index=["best", "left", "right"].index(st.session_state.route_mode)
+            format_func=lambda x: {"best": "🌟 最佳航线", "left": "⬅️ 向左绕行", "right": "➡️ 向右绕行"}[x],
+            index=["best", "left", "right"].index(st.session_state.route_mode),
+            key="mode_select"
         )
         if selected_mode != st.session_state.route_mode:
             st.session_state.route_mode = selected_mode
             st.session_state.current_route = []
             save_data()
-            st.rerun()
         
         st.divider()
         
-        # 坐标设置按钮
         st.markdown("### 🎯 坐标设置")
         st.caption("点击下方按钮后，再点击地图上的位置")
         
         col_set1, col_set2 = st.columns(2)
         with col_set1:
-            if st.button("📍 设置起点", use_container_width=True, type="primary"):
+            if st.button("📍 设置起点", use_container_width=True, key="set_start"):
                 st.session_state.set_mode = 'start'
-                st.rerun()
+                st.toast("🔴 请点击地图设置起点", icon="🔴")
         with col_set2:
-            if st.button("🏁 设置终点", use_container_width=True, type="primary"):
+            if st.button("🏁 设置终点", use_container_width=True, key="set_end"):
                 st.session_state.set_mode = 'end'
-                st.rerun()
+                st.toast("🟢 请点击地图设置终点", icon="🟢")
         
         st.divider()
         
@@ -573,15 +506,15 @@ with tab1:
         with st.expander("📍 起点手动输入", expanded=False):
             col_s1, col_s2 = st.columns(2)
             with col_s1:
-                new_start_lat = st.number_input("纬度", value=st.session_state.start_point[0], format="%.6f")
+                new_start_lat = st.number_input("纬度", value=st.session_state.start_point[0], format="%.6f", key="start_lat")
             with col_s2:
-                new_start_lng = st.number_input("经度", value=st.session_state.start_point[1], format="%.6f")
+                new_start_lng = st.number_input("经度", value=st.session_state.start_point[1], format="%.6f", key="start_lng")
             
-            if st.button("✈️ 更新起点", use_container_width=True):
+            if st.button("✈️ 更新起点", use_container_width=True, key="update_start"):
                 st.session_state.start_point = (new_start_lat, new_start_lng)
                 st.session_state.current_route = []
                 save_data()
-                st.rerun()
+                st.success("起点已更新")
             
             st.caption(f"当前: {st.session_state.start_point[0]:.6f}, {st.session_state.start_point[1]:.6f}")
         
@@ -589,28 +522,25 @@ with tab1:
         with st.expander("🏁 终点手动输入", expanded=False):
             col_e1, col_e2 = st.columns(2)
             with col_e1:
-                new_end_lat = st.number_input("纬度", value=st.session_state.end_point[0], format="%.6f")
+                new_end_lat = st.number_input("纬度", value=st.session_state.end_point[0], format="%.6f", key="end_lat")
             with col_e2:
-                new_end_lng = st.number_input("经度", value=st.session_state.end_point[1], format="%.6f")
+                new_end_lng = st.number_input("经度", value=st.session_state.end_point[1], format="%.6f", key="end_lng")
             
-            if st.button("🎯 更新终点", use_container_width=True):
+            if st.button("🎯 更新终点", use_container_width=True, key="update_end"):
                 st.session_state.end_point = (new_end_lat, new_end_lng)
                 st.session_state.current_route = []
                 save_data()
-                st.rerun()
+                st.success("终点已更新")
             
             st.caption(f"当前: {st.session_state.end_point[0]:.6f}, {st.session_state.end_point[1]:.6f}")
         
         st.divider()
         
-        # 飞行参数
         new_altitude = st.number_input(
             "✈️ 飞行高度（米）",
-            min_value=0.0,
-            max_value=100.0,
-            value=st.session_state.flight_altitude,
-            step=1.0,
-            help="高于红色障碍物时需要绕行"
+            min_value=0.0, max_value=100.0,
+            value=st.session_state.flight_altitude, step=1.0,
+            key="altitude"
         )
         if new_altitude != st.session_state.flight_altitude:
             st.session_state.flight_altitude = new_altitude
@@ -619,11 +549,9 @@ with tab1:
         
         new_radius = st.number_input(
             "🛡️ 安全半径（米）",
-            min_value=1.0,
-            max_value=30.0,
-            value=st.session_state.safety_radius,
-            step=1.0,
-            help="绕行时与障碍物的距离"
+            min_value=1.0, max_value=30.0,
+            value=st.session_state.safety_radius, step=1.0,
+            key="radius"
         )
         if new_radius != st.session_state.safety_radius:
             st.session_state.safety_radius = new_radius
@@ -632,7 +560,6 @@ with tab1:
         
         st.divider()
         
-        # 障碍物统计
         st.subheader(f"📦 障碍物 ({len(st.session_state.obstacles)})")
         
         high_obs = [o for o in st.session_state.obstacles if o.get("height", 0) >= st.session_state.flight_altitude]
@@ -646,7 +573,6 @@ with tab1:
         
         st.divider()
         
-        # 障碍物列表
         if st.session_state.obstacles:
             for i, obs in enumerate(st.session_state.obstacles):
                 col_a, col_b = st.columns([4, 1])
@@ -669,7 +595,6 @@ with tab1:
         else:
             st.info("📭 暂无障碍物，请在地图上绘制多边形")
         
-        # 航线信息
         if st.session_state.current_route:
             st.divider()
             st.subheader("📊 航线信息")
@@ -678,12 +603,8 @@ with tab1:
                 total_dist += calculate_distance(st.session_state.current_route[i], st.session_state.current_route[i+1])
             st.metric("总距离", f"{total_dist:.1f} m")
             st.metric("航点数", len(st.session_state.current_route))
-            
-            # 显示模式信息
-            mode_display = {"best": "🌟 最佳航线", "left": "⬅️ 向左绕行", "right": "➡️ 向右绕行"}
-            st.info(f"当前模式: {mode_display[st.session_state.route_mode]}")
 
-# ====================== 标签页2：飞行监控 ======================
+# ====================== 标签页2 ======================
 with tab2:
     col_m1, col_m2 = st.columns([1, 2])
     
@@ -691,11 +612,11 @@ with tab2:
         st.subheader("🎮 控制面板")
         
         if not st.session_state.heartbeat_running:
-            if st.button("▶️ 开始心跳模拟", use_container_width=True, type="primary"):
+            if st.button("▶️ 开始心跳", use_container_width=True, type="primary"):
                 st.session_state.heartbeat_running = True
                 st.rerun()
         else:
-            if st.button("⏸️ 停止心跳模拟", use_container_width=True):
+            if st.button("⏸️ 停止心跳", use_container_width=True):
                 st.session_state.heartbeat_running = False
                 st.rerun()
         
@@ -752,27 +673,26 @@ with tab2:
 # ====================== 自动心跳 ======================
 if st.session_state.heartbeat_running:
     import time
-    if len(st.session_state.heartbeat_history) > 0:
-        last_time_str = st.session_state.heartbeat_history[-1]["time"]
-        last_time = datetime.strptime(last_time_str, "%H:%M:%S")
-        now = datetime.now()
+    now = datetime.now()
+    
+    if len(st.session_state.heartbeat_history) == 0:
+        st.session_state.heartbeat_history.append({
+            "seq": 1,
+            "time": now.strftime("%H:%M:%S"),
+            "status": "正常"
+        })
+        time.sleep(0.1)
+        st.rerun()
+    else:
+        last_time = datetime.strptime(st.session_state.heartbeat_history[-1]["time"], "%H:%M:%S")
         if (now - last_time).total_seconds() >= 2:
-            new_seq = len(st.session_state.heartbeat_history) + 1
             st.session_state.heartbeat_history.append({
-                "seq": new_seq,
+                "seq": len(st.session_state.heartbeat_history) + 1,
                 "time": now.strftime("%H:%M:%S"),
                 "status": "正常"
             })
             time.sleep(0.1)
             st.rerun()
-    elif len(st.session_state.heartbeat_history) == 0:
-        st.session_state.heartbeat_history.append({
-            "seq": 1,
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "status": "正常"
-        })
-        time.sleep(0.1)
-        st.rerun()
 
 # ====================== 页脚 ======================
 st.markdown("---")
