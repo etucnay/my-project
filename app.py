@@ -808,4 +808,38 @@ with tab2:
             ax.plot(range(1, len(seq_list)+1), seq_list, marker='o', color='#2ecc71', linewidth=2)
             ax.set_xlabel("心跳次数")
             ax.set_ylabel("序列号")
-            ax.set_title("无人机心跳
+            ax.set_title("无人机心跳序列")
+            ax.grid(True, alpha=0.3)
+            st.pyplot(fig)
+
+# ====================== 自动心跳 ======================
+if st.session_state.heartbeat_running:
+    import time
+    if len(st.session_state.heartbeat_history) > 0:
+        last_time_str = st.session_state.heartbeat_history[-1]["time"]
+        try:
+            last_time = datetime.strptime(last_time_str, "%H:%M:%S")
+            now = datetime.now()
+            if (now - last_time).total_seconds() >= 2:
+                new_seq = len(st.session_state.heartbeat_history) + 1
+                st.session_state.heartbeat_history.append({
+                    "seq": new_seq,
+                    "time": now.strftime("%H:%M:%S"),
+                    "status": "正常"
+                })
+                time.sleep(0.1)
+                st.rerun()
+        except:
+            pass
+    elif len(st.session_state.heartbeat_history) == 0:
+        st.session_state.heartbeat_history.append({
+            "seq": 1,
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "status": "正常"
+        })
+        time.sleep(0.1)
+        st.rerun()
+
+# ====================== 页脚 ======================
+st.markdown("---")
+st.markdown("🚁 无人机航线规划系统 | 三种绕行模式：向左绕行 ⬅️ | 向右绕行 ➡️ | 最佳航线 🌟")
