@@ -8,6 +8,7 @@ from datetime import datetime
 import pandas as pd
 import math
 import random
+import time
 
 # ====================== 页面配置 ======================
 st.set_page_config(
@@ -62,6 +63,8 @@ if "flight_log" not in st.session_state:
     st.session_state.flight_log = []
 if "current_position" not in st.session_state:
     st.session_state.current_position = None
+if "last_auto_time" not in st.session_state:
+    st.session_state.last_auto_time = 0
 
 # ====================== 通信链路状态 ======================
 if "gcs_status" not in st.session_state:
@@ -168,7 +171,6 @@ def is_path_safe(start, end, obstacles, flight_altitude):
     return True
 
 def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
-    """智能穿行 - 从障碍物之间穿过"""
     high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= flight_altitude]
     
     if not high_obstacles:
@@ -177,26 +179,23 @@ def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
     if is_path_safe(start, end, high_obstacles, flight_altitude):
         return [start, end]
     
-    # 收集绕行点
     nodes = [start, end]
     for obs in high_obstacles:
         bounds = get_polygon_bounds(obs["polygon"])
         min_lat, max_lat, min_lng, max_lng = bounds
         center_lat = (min_lat + max_lat) / 2
         center_lng = (min_lng + max_lng) / 2
-        offset = safety_radius * 2 / 111320
+        offset = safety_radius * 3 / 111320
         nodes.append((min_lat - offset, center_lng))
         nodes.append((max_lat + offset, center_lng))
         nodes.append((center_lat, min_lng - offset))
         nodes.append((center_lat, max_lng + offset))
     
-    # 去重
     unique = []
     for n in nodes:
         if n not in unique:
             unique.append(n)
     
-    # 构建图
     n = len(unique)
     adj = [[] for _ in range(n)]
     for i in range(n):
@@ -206,7 +205,6 @@ def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
                 adj[i].append((j, dist))
                 adj[j].append((i, dist))
     
-    # Dijkstra
     start_idx = unique.index(start)
     end_idx = unique.index(end)
     INF = float('inf')
@@ -242,7 +240,6 @@ def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
     return path
 
 def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
-    """强制向左绕行"""
     high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= flight_altitude]
     
     if not high_obstacles:
@@ -253,14 +250,15 @@ def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
     
     waypoints = [start]
     current = start
+    remaining = high_obstacles.copy()
     
     for _ in range(20):
-        if is_path_safe(current, end, high_obstacles, flight_altitude):
+        if is_path_safe(current, end, remaining, flight_altitude):
             waypoints.append(end)
             break
         
         blocking = None
-        for obs in high_obstacles:
+        for obs in remaining:
             if line_intersects_polygon(current, end, obs["polygon"]):
                 blocking = obs
                 break
@@ -273,7 +271,7 @@ def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
             left_point = (center_lat, min_lng - offset)
             waypoints.append(left_point)
             current = left_point
-            high_obstacles.remove(blocking)
+            remaining.remove(blocking)
         else:
             waypoints.append(end)
             break
@@ -281,7 +279,6 @@ def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
     return waypoints
 
 def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
-    """强制向右绕行"""
     high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= flight_altitude]
     
     if not high_obstacles:
@@ -292,14 +289,15 @@ def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
     
     waypoints = [start]
     current = start
+    remaining = high_obstacles.copy()
     
     for _ in range(20):
-        if is_path_safe(current, end, high_obstacles, flight_altitude):
+        if is_path_safe(current, end, remaining, flight_altitude):
             waypoints.append(end)
             break
         
         blocking = None
-        for obs in high_obstacles:
+        for obs in remaining:
             if line_intersects_polygon(current, end, obs["polygon"]):
                 blocking = obs
                 break
@@ -312,7 +310,7 @@ def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
             right_point = (center_lat, max_lng + offset)
             waypoints.append(right_point)
             current = right_point
-            high_obstacles.remove(blocking)
+            remaining.remove(blocking)
         else:
             waypoints.append(end)
             break
@@ -377,6 +375,7 @@ def start_mission():
     st.session_state.mission_start_time = datetime.now()
     st.session_state.current_position = st.session_state.current_route[0]
     st.session_state.battery_level = 100
+    st.session_state.last_auto_time = time.time()
     add_log("任务开始", f"航线共 {len(st.session_state.current_route)-1} 个航段", "success")
 
 def pause_mission():
@@ -385,6 +384,7 @@ def pause_mission():
 
 def resume_mission():
     st.session_state.mission_paused = False
+    st.session_state.last_auto_time = time.time()
     add_log("任务恢复", "", "success")
 
 def stop_mission():
@@ -402,9 +402,13 @@ def reset_mission():
     st.session_state.battery_level = 100
     add_log("任务重置", "", "info")
 
-# ====================== 前进一个航点（会被JS自动调用） ======================
-def advance_waypoint():
-    if st.session_state.mission_active and not st.session_state.mission_paused:
+# ====================== 自动飞行 - 每1.5秒前进一个航点 ======================
+if st.session_state.mission_active and not st.session_state.mission_paused:
+    current_time = time.time()
+    if st.session_state.last_auto_time == 0:
+        st.session_state.last_auto_time = current_time
+    elif current_time - st.session_state.last_auto_time >= 1.5:
+        st.session_state.last_auto_time = current_time
         if st.session_state.current_waypoint_index < len(st.session_state.current_route) - 1:
             st.session_state.current_waypoint_index += 1
             st.session_state.current_position = st.session_state.current_route[st.session_state.current_waypoint_index]
@@ -413,48 +417,7 @@ def advance_waypoint():
             if st.session_state.current_waypoint_index >= len(st.session_state.current_route) - 1:
                 st.session_state.mission_active = False
                 add_log("任务完成", f"总时间: {format_time(get_elapsed())}", "success")
-            return True
-    return False
-
-# ====================== 自动前进按钮（隐藏，被JS点击） ======================
-auto_click_html = """
-<div id="auto-clicker" style="display:none;"></div>
-<script>
-    let interval = null;
-    function startAutoClick() {
-        if (interval) clearInterval(interval);
-        interval = setInterval(function() {
-            const buttons = document.querySelectorAll('button');
-            for (let btn of buttons) {
-                if (btn.innerText === '▶️ 前进') {
-                    btn.click();
-                    break;
-                }
-            }
-        }, 1500);
-    }
-    function stopAutoClick() {
-        if (interval) {
-            clearInterval(interval);
-            interval = null;
-        }
-    }
-    const observer = new MutationObserver(function() {
-        const btns = document.querySelectorAll('button');
-        for (let btn of btns) {
-            if (btn.innerText === '⏸️ 暂停' && btn.disabled === false) {
-                startAutoClick();
-                return;
-            }
-            if (btn.innerText === '▶️ 恢复') {
-                stopAutoClick();
-                return;
-            }
-        }
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
-</script>
-"""
+            st.rerun()
 
 # ====================== 创建地图 ======================
 def create_map(show_flight=True):
@@ -768,13 +731,6 @@ with tab2:
         else:
             st.button("✈️ 飞行中", use_container_width=True, disabled=True)
     
-    # 手动前进按钮（被JS自动点击）
-    col_adv = st.columns([1, 2, 1])
-    with col_adv[1]:
-        if st.button("▶️ 前进", key="advance_btn", use_container_width=True):
-            advance_waypoint()
-            st.rerun()
-    
     st.divider()
     
     # 实时状态
@@ -911,9 +867,6 @@ if st.session_state.heartbeat_running:
             })
             st.rerun()
 
-# ====================== 注入自动点击JS ======================
-st.components.v1.html(auto_click_html, height=0)
-
 # ====================== 页脚 ======================
 st.markdown("---")
-st.markdown("🚁 无人机航线规划与飞行监控系统 | 开始任务后自动每1.5秒前进一个航点")
+st.markdown("🚁 无人机航线规划与飞行监控系统 | 点击「开始任务」后自动每1.5秒飞一个航点")
