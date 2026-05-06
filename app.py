@@ -64,20 +64,28 @@ if "flight_speed" not in st.session_state:
     st.session_state.flight_speed = 8.5
 if "battery_level" not in st.session_state:
     st.session_state.battery_level = 100
+if "flight_log" not in st.session_state:
+    st.session_state.flight_log = []
+if "current_position" not in st.session_state:
+    st.session_state.current_position = None
+if "last_auto_progress" not in st.session_state:
+    st.session_state.last_auto_progress = 0
+if "telemetry_data" not in st.session_state:
+    st.session_state.telemetry_data = []
+
+# ====================== 通信链路状态 ======================
 if "gcs_status" not in st.session_state:
     st.session_state.gcs_status = "online"
 if "obc_status" not in st.session_state:
     st.session_state.obc_status = "online"
 if "fcu_status" not in st.session_state:
     st.session_state.fcu_status = "online"
-if "flight_log" not in st.session_state:
-    st.session_state.flight_log = []
-if "current_position" not in st.session_state:
-    st.session_state.current_position = None
-if "last_update_time" not in st.session_state:
-    st.session_state.last_update_time = None
-if "auto_progress_enabled" not in st.session_state:
-    st.session_state.auto_progress_enabled = False
+if "link_quality" not in st.session_state:
+    st.session_state.link_quality = 98
+if "packet_loss" not in st.session_state:
+    st.session_state.packet_loss = 0
+if "signal_strength" not in st.session_state:
+    st.session_state.signal_strength = -65
 
 # ====================== 保存/加载 ======================
 def save_data():
@@ -469,19 +477,18 @@ def start_mission():
     st.session_state.mission_start_time = datetime.now()
     st.session_state.current_position = st.session_state.current_route[0]
     st.session_state.battery_level = 100
-    st.session_state.auto_progress_enabled = True
+    st.session_state.last_auto_progress = time.time()
     
-    add_flight_log("任务开始", f"航线共 {len(st.session_state.current_route)} 个航点")
+    add_flight_log("任务开始", f"航线共 {len(st.session_state.current_route)} 个航点", "success")
 
 def pause_mission():
     st.session_state.mission_paused = True
-    st.session_state.auto_progress_enabled = False
-    add_flight_log("任务暂停", f"当前航点: {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)}")
+    add_flight_log("任务暂停", f"当前航点: {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)}", "warning")
 
 def resume_mission():
     st.session_state.mission_paused = False
-    st.session_state.auto_progress_enabled = True
-    add_flight_log("任务恢复", "")
+    st.session_state.last_auto_progress = time.time()
+    add_flight_log("任务恢复", "", "success")
 
 def stop_mission():
     st.session_state.mission_active = False
@@ -489,46 +496,68 @@ def stop_mission():
     st.session_state.current_waypoint_index = 0
     st.session_state.mission_start_time = None
     st.session_state.current_position = None
-    st.session_state.auto_progress_enabled = False
-    add_flight_log("任务停止", f"总飞行时间: {format_time(get_elapsed_time())}")
+    add_flight_log("任务停止", f"总飞行时间: {format_time(get_elapsed_time())}", "error")
 
 def reset_mission():
     stop_mission()
-    add_flight_log("任务重置", "")
+    add_flight_log("任务重置", "", "info")
 
-def add_flight_log(action, details):
+def add_flight_log(action, details, level="info"):
     st.session_state.flight_log.insert(0, {
         "time": datetime.now().strftime("%H:%M:%S"),
         "action": action,
-        "details": details
+        "details": details,
+        "level": level
     })
     if len(st.session_state.flight_log) > 50:
         st.session_state.flight_log = st.session_state.flight_log[:50]
 
 def auto_progress_mission():
-    """自动推进任务进度"""
+    """自动推进任务进度 - 连贯飞行"""
     if not st.session_state.mission_active or st.session_state.mission_paused:
         return False
     
     if not st.session_state.current_route:
         return False
     
-    # 检查是否完成所有航点
+    # 计算飞行时间间隔（基于航点距离）
     if st.session_state.current_waypoint_index >= len(st.session_state.current_route):
         st.session_state.mission_active = False
-        st.session_state.auto_progress_enabled = False
-        add_flight_log("任务完成", f"总飞行时间: {format_time(get_elapsed_time())}")
+        add_flight_log("任务完成", f"总飞行时间: {format_time(get_elapsed_time())}", "success")
         return False
     
-    # 更新当前位置
-    current_wp = st.session_state.current_route[st.session_state.current_waypoint_index]
-    st.session_state.current_position = current_wp
+    # 获取当前航点和下一航点
+    current_target = st.session_state.current_route[st.session_state.current_waypoint_index]
+    
+    # 移动无人机到下一个航点
+    st.session_state.current_position = current_target
+    
+    # 计算这段距离的时间（用于模拟连贯飞行）
+    for i in range(len(st.session_state.current_route) - 1):
+        if st.session_state.current_route[i] == st.session_state.current_position:
+            next_idx = i + 1
+            if next_idx < len(st.session_state.current_route):
+                dist = calculate_distance(current_target, st.session_state.current_route[next_idx])
+                segment_time = dist / st.session_state.flight_speed
+                st.session_state.next_segment_delay = max(1, segment_time)
     
     # 模拟电量消耗
-    st.session_state.battery_level = max(0, st.session_state.battery_level - random.uniform(0.5, 1.5))
+    st.session_state.battery_level = max(0, st.session_state.battery_level - random.uniform(0.3, 0.8))
     
     # 记录到达航点
-    add_flight_log("航点到达", f"航点 {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)}")
+    add_flight_log("航点到达", f"航点 {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)}", "info")
+    
+    # 添加遥测数据
+    st.session_state.telemetry_data.insert(0, {
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "lat": f"{st.session_state.current_position[0]:.6f}",
+        "lng": f"{st.session_state.current_position[1]:.6f}",
+        "altitude": st.session_state.flight_altitude,
+        "speed": st.session_state.flight_speed,
+        "battery": f"{st.session_state.battery_level:.1f}%"
+    })
+    if len(st.session_state.telemetry_data) > 20:
+        st.session_state.telemetry_data = st.session_state.telemetry_data[:20]
     
     # 前进到下一个航点
     st.session_state.current_waypoint_index += 1
@@ -536,10 +565,18 @@ def auto_progress_mission():
     # 检查是否完成
     if st.session_state.current_waypoint_index >= len(st.session_state.current_route):
         st.session_state.mission_active = False
-        st.session_state.auto_progress_enabled = False
-        add_flight_log("任务完成", f"总飞行时间: {format_time(get_elapsed_time())}")
+        add_flight_log("任务完成", f"总飞行时间: {format_time(get_elapsed_time())}", "success")
+        return True
     
     return True
+
+def update_link_quality():
+    """更新通信链路质量"""
+    # 动态模拟链路质量变化
+    if st.session_state.mission_active:
+        st.session_state.link_quality = max(70, min(99, st.session_state.link_quality + random.uniform(-2, 2)))
+        st.session_state.packet_loss = max(0, min(5, st.session_state.packet_loss + random.uniform(-0.5, 0.5)))
+        st.session_state.signal_strength = max(-85, min(-55, st.session_state.signal_strength + random.uniform(-2, 2)))
 
 # ====================== 创建地图 ======================
 def create_map(show_flight=True, key_suffix=""):
@@ -645,19 +682,31 @@ def create_map(show_flight=True, key_suffix=""):
     if show_flight and st.session_state.current_position:
         folium.Marker(
             location=st.session_state.current_position,
-            popup=f"无人机当前位置",
+            popup=f"✈️ 无人机当前位置",
             icon=folium.Icon(color="blue", icon="plane", prefix="fa")
         ).add_to(m)
+        
+        # 添加飞行方向指示
+        if st.session_state.current_waypoint_index < len(st.session_state.current_route):
+            next_point = st.session_state.current_route[st.session_state.current_waypoint_index]
+            folium.PolyLine(
+                locations=[st.session_state.current_position, next_point],
+                color="#00aaff",
+                weight=3,
+                opacity=0.7,
+                dash_array='5, 5'
+            ).add_to(m)
     
     return m
 
 # ====================== 自动飞行循环 ======================
-if st.session_state.auto_progress_enabled and st.session_state.mission_active and not st.session_state.mission_paused:
-    # 检查上次更新时间，控制飞行速度
-    now = time.time()
-    if st.session_state.last_update_time is None or (now - st.session_state.last_update_time) >= 1.5:
-        st.session_state.last_update_time = now
+# 每1.5秒自动前进（模拟连贯飞行）
+current_time = time.time()
+if st.session_state.mission_active and not st.session_state.mission_paused:
+    if st.session_state.last_auto_progress == 0 or (current_time - st.session_state.last_auto_progress) >= 1.5:
+        st.session_state.last_auto_progress = current_time
         auto_progress_mission()
+        update_link_quality()
         st.rerun()
 
 # ====================== 页面布局 ======================
@@ -891,7 +940,7 @@ with tab1:
             st.metric("总距离", f"{total_dist:.1f} m")
             st.metric("航点数", len(st.session_state.current_route))
 
-# ====================== 标签页2 ======================
+# ====================== 标签页2：飞行任务监控 ======================
 with tab2:
     st.subheader("🎮 飞行任务控制")
     
@@ -925,6 +974,7 @@ with tab2:
     
     st.divider()
     
+    # 飞行状态监控面板（仿照图片样式）
     st.subheader("📊 飞行实时状态")
     
     col_stat1, col_stat2, col_stat3, col_stat4, col_stat5, col_stat6 = st.columns(6)
@@ -956,30 +1006,76 @@ with tab2:
     
     with col_stat6:
         battery = st.session_state.battery_level
-        st.metric("电量模拟", f"{battery:.0f}%")
+        battery_color = "🟢" if battery > 30 else "🟡" if battery > 15 else "🔴"
+        st.metric("电量模拟", f"{battery_color} {battery:.0f}%")
     
     st.divider()
     
+    # 实时飞行地图
     st.subheader("🗺️ 实时飞行地图")
     flight_map = create_map(show_flight=True, key_suffix="monitor")
     st_folium(flight_map, width=900, height=450, returned_objects=[], key="monitor_map")
     
     st.divider()
     
+    # 通信链路拓扑与数据流（仿照图片样式）
     st.subheader("📡 通信链路拓扑与数据流")
     
     col_link1, col_link2, col_link3 = st.columns(3)
     
     with col_link1:
-        st.info(f"**地面站 (GCS)**\n\n🟢 在线")
-    with col_link2:
-        st.info(f"**机载计算机 (OBC)**\n\n🟢 在线")
-    with col_link3:
-        st.info(f"**飞行控制单元 (FCU)**\n\n🟢 在线")
+        gcs_color = "🟢" if st.session_state.gcs_status == "online" else "🔴"
+        st.info(f"**地面站 (GCS)**\n\n{gcs_color} {'在线' if st.session_state.gcs_status == 'online' else '离线'}")
     
-    st.caption("🔗 数据链路状态: GCS ↔ OBC ↔ FCU")
+    with col_link2:
+        obc_color = "🟢" if st.session_state.obc_status == "online" else "🔴"
+        st.info(f"**机载计算机 (OBC)**\n\n{obc_color} {'在线' if st.session_state.obc_status == 'online' else '离线'}")
+    
+    with col_link3:
+        fcu_color = "🟢" if st.session_state.fcu_status == "online" else "🔴"
+        st.info(f"**飞行控制单元 (FCU)**\n\n{fcu_color} {'在线' if st.session_state.fcu_status == 'online' else '离线'}")
+    
+    # 链路质量指示器
+    st.markdown("### 数据链路质量")
+    
+    col_qual1, col_qual2, col_qual3, col_qual4 = st.columns(4)
+    
+    with col_qual1:
+        quality_color = "🟢" if st.session_state.link_quality > 90 else "🟡" if st.session_state.link_quality > 70 else "🔴"
+        st.metric("链路质量", f"{quality_color} {st.session_state.link_quality:.0f}%")
+    
+    with col_qual2:
+        st.metric("丢包率", f"{st.session_state.packet_loss:.1f}%")
+    
+    with col_qual3:
+        st.metric("信号强度", f"{st.session_state.signal_strength:.0f} dBm")
+    
+    with col_qual4:
+        if st.session_state.mission_active:
+            tx_rate = random.randint(50, 150)
+            rx_rate = random.randint(50, 150)
+            st.metric("数据速率", f"↑{tx_rate} ↓{rx_rate} kbps")
+        else:
+            st.metric("数据速率", "0 kbps")
+    
+    # 链路拓扑图（文本表示）
+    st.markdown("---")
+    st.caption("🔗 数据链路: GCS <--MAVLink--> OBC <--UART--> FCU")
+    
+    # 数据流指示器
+    if st.session_state.mission_active:
+        st.markdown("📡 实时数据流: GPS | IMU | 气压计 | 磁力计 | 电池监控")
+        
+        # 动态数据流动画效果
+        data_streams = ["📡 遥测数据", "🛰️ GPS定位", "⚡ 电池状态", "🎮 控制指令"]
+        cols = st.columns(len(data_streams))
+        for idx, stream in enumerate(data_streams):
+            with cols[idx]:
+                st.markdown(f"`{stream}` 🔄")
     
     st.divider()
+    
+    # 飞行进度条
     st.subheader("📈 任务进度")
     
     if st.session_state.current_route:
@@ -988,8 +1084,13 @@ with tab2:
         progress = current_wp / total_wp if total_wp > 0 else 0
         
         st.progress(progress, text=f"航点进度: {current_wp}/{total_wp}")
+        
+        # 估计剩余时间
+        if st.session_state.mission_active:
+            remaining_time = get_estimated_arrival_time()
+            st.caption(f"⏱️ 预计剩余时间: {format_time(remaining_time)}")
 
-# ====================== 标签页3 ======================
+# ====================== 标签页3：飞行日志与遥测 ======================
 with tab3:
     col_log1, col_log2 = st.columns([1, 1])
     
@@ -1002,10 +1103,14 @@ with tab3:
         
         if st.session_state.flight_log:
             for log in st.session_state.flight_log[:20]:
-                st.markdown(f"**[{log['time']}]** {log['action']}")
-                if log['details']:
-                    st.caption(f"  └─ {log['details']}")
-                st.divider()
+                if log.get('level') == 'success':
+                    st.success(f"**[{log['time']}]** {log['action']} - {log['details']}")
+                elif log.get('level') == 'error':
+                    st.error(f"**[{log['time']}]** {log['action']} - {log['details']}")
+                elif log.get('level') == 'warning':
+                    st.warning(f"**[{log['time']}]** {log['action']} - {log['details']}")
+                else:
+                    st.info(f"**[{log['time']}]** {log['action']} - {log['details']}")
         else:
             st.info("暂无飞行日志")
     
@@ -1017,8 +1122,9 @@ with tab3:
         else:
             current_pos = "未起飞"
         
-        telemetry_data = {
-            "参数": ["当前位置", "当前航点", "总航点数", "飞行速度", "飞行高度", "安全半径", "绕行模式", "电池电量", "已用时间", "剩余距离", "预计到达时间"],
+        # 遥测数据表格
+        telemetry_table = {
+            "参数": ["当前位置", "当前航点", "总航点数", "飞行速度", "飞行高度", "安全半径", "绕行模式", "电池电量", "已用时间", "剩余距离", "预计到达时间", "链路质量", "丢包率"],
             "数值": [
                 current_pos,
                 f"{st.session_state.current_waypoint_index}",
@@ -1030,15 +1136,18 @@ with tab3:
                 f"{st.session_state.battery_level:.1f}%",
                 format_time(get_elapsed_time()),
                 f"{calculate_remaining_distance(st.session_state.current_route, st.session_state.current_waypoint_index):.0f} m",
-                format_time(get_estimated_arrival_time())
+                format_time(get_estimated_arrival_time()),
+                f"{st.session_state.link_quality:.0f}%",
+                f"{st.session_state.packet_loss:.1f}%"
             ]
         }
         
-        df = pd.DataFrame(telemetry_data)
+        df = pd.DataFrame(telemetry_table)
         st.dataframe(df, use_container_width=True, hide_index=True)
         
         st.divider()
         
+        # 心跳检测
         st.subheader("💓 心跳检测")
         
         col_heart1, col_heart2 = st.columns(2)
@@ -1093,4 +1202,4 @@ if st.session_state.heartbeat_running:
 
 # ====================== 页脚 ======================
 st.markdown("---")
-st.markdown("🚁 无人机航线规划与飞行监控系统 | 智能穿行模式会自动寻找障碍物之间的安全通道 | 开始任务后无人机将自主飞行")
+st.markdown("🚁 无人机航线规划与飞行监控系统 | 智能穿行模式会自动寻找障碍物之间的安全通道 | 开始任务后无人机将自主连贯飞行")
