@@ -481,6 +481,7 @@ def create_map(show_flight=True):
         attr="高德地图"
     )
     
+    # 绘图工具 - 用于添加障碍物
     if not st.session_state.mission_active and not show_flight:
         draw = Draw(
             draw_options={
@@ -1045,30 +1046,25 @@ if st.session_state.heartbeat_running:
             time.sleep(0.5)
             st.rerun()
 
-# ====================== 核心：自动飞行（逐点移动，每次刷新前进一个） ======================
+# ====================== 核心：自动飞行（逐点移动） ======================
 if st.session_state.mission_active and not st.session_state.mission_paused:
     current_time = time.time()
     
-    # 初始化计时器
     if st.session_state.last_auto_time == 0:
         st.session_state.last_auto_time = current_time
-    # 每1.5秒前进一个航点
     elif current_time - st.session_state.last_auto_time >= 1.5:
         st.session_state.last_auto_time = current_time
         
-        # 前进一个航点
         if st.session_state.current_waypoint_index < len(st.session_state.current_route) - 1:
             st.session_state.current_waypoint_index += 1
             st.session_state.current_position = st.session_state.current_route[st.session_state.current_waypoint_index]
             st.session_state.battery_level = max(0, st.session_state.battery_level - random.uniform(0.3, 0.8))
             add_log("航点到达", f"航点 {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)-1}", "info")
             
-            # 检查是否完成
             if st.session_state.current_waypoint_index >= len(st.session_state.current_route) - 1:
                 st.session_state.mission_active = False
                 add_log("任务完成", f"总时间: {format_time(get_elapsed())}", "success")
             
-            # 刷新页面显示新位置
             st.rerun()
 
 # ====================== 页脚 ======================
