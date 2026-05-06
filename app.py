@@ -9,6 +9,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import math
 import random
+import time
 
 # ====================== 页面配置 ======================
 st.set_page_config(
@@ -75,6 +76,8 @@ if "current_position" not in st.session_state:
     st.session_state.current_position = None
 if "last_update_time" not in st.session_state:
     st.session_state.last_update_time = None
+if "auto_progress_enabled" not in st.session_state:
+    st.session_state.auto_progress_enabled = False
 
 # ====================== 保存/加载 ======================
 def save_data():
@@ -145,13 +148,11 @@ def segments_intersect(p1, p2, p3, p4):
 
 def line_intersects_polygon(line_start, line_end, polygon):
     """判断线段是否与多边形相交"""
-    # 检查线段是否与多边形边相交
     for i in range(len(polygon)):
         p1 = polygon[i]
         p2 = polygon[(i + 1) % len(polygon)]
         if segments_intersect(line_start, line_end, p1, p2):
             return True
-    # 检查端点是否在多边形内
     if point_in_polygon(line_start, polygon) or point_in_polygon(line_end, polygon):
         return True
     return False
@@ -183,7 +184,6 @@ def get_obstacle_expanded_bounds(polygon, safety_radius):
     min_lat, max_lat, min_lng, max_lng = get_polygon_bounds(polygon)
     center_lat, center_lng = get_polygon_center(polygon)
     
-    # 计算偏移量
     offset_meters = safety_radius
     offset_lat = offset_meters / 111320
     offset_lng = offset_meters / (111320 * math.cos(math.radians(center_lat)))
@@ -200,13 +200,11 @@ def get_obstacle_expanded_bounds(polygon, safety_radius):
 def find_path_between_obstacles(start, end, obstacles, flight_altitude, safety_radius):
     """寻找从障碍物之间穿行的路径"""
     
-    # 收集需要绕行的障碍物
     high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= flight_altitude]
     
     if not high_obstacles:
         return [start, end]
     
-    # 检查直线是否安全
     if is_path_safe(start, end, high_obstacles, flight_altitude):
         return [start, end]
     
@@ -218,22 +216,15 @@ def find_path_between_obstacles(start, end, obstacles, flight_altitude, safety_r
     
     # 生成候选穿行点
     candidate_points = []
-    
-    # 添加起点和终点
     candidate_points.append(start)
     candidate_points.append(end)
     
     # 为每个障碍物生成上下左右四个方向的穿行点
     for bounds in expanded_bounds:
-        # 上方点
         top_point = (bounds['min_lat'], bounds['center_lng'])
-        # 下方点
         bottom_point = (bounds['max_lat'], bounds['center_lng'])
-        # 左方点
         left_point = (bounds['center_lat'], bounds['min_lng'])
-        # 右方点
         right_point = (bounds['center_lat'], bounds['max_lng'])
-        
         candidate_points.extend([top_point, bottom_point, left_point, right_point])
     
     # 寻找障碍物之间的间隙点
@@ -242,45 +233,46 @@ def find_path_between_obstacles(start, end, obstacles, flight_altitude, safety_r
             b1 = expanded_bounds[i]
             b2 = expanded_bounds[j]
             
-            # 检查水平间隙
             if b1['center_lat'] < b2['center_lat']:
                 gap_lat = (b1['max_lat'] + b2['min_lat']) / 2
                 gap_lng = (b1['center_lng'] + b2['center_lng']) / 2
                 candidate_points.append((gap_lat, gap_lng))
             
-            # 检查垂直间隙
             if b1['center_lng'] < b2['center_lng']:
                 gap_lng = (b1['max_lng'] + b2['min_lng']) / 2
                 gap_lat = (b1['center_lat'] + b2['center_lat']) / 2
                 candidate_points.append((gap_lat, gap_lng))
     
-    # 使用A*算法思想寻找最短安全路径
+    # 去重
+    unique_points = []
+    for p in candidate_points:
+        if p not in unique_points:
+            unique_points.append(p)
+    
     # 构建图
     graph = {}
-    for i, p1 in enumerate(candidate_points):
+    for i, p1 in enumerate(unique_points):
         graph[i] = []
-        for j, p2 in enumerate(candidate_points):
+        for j, p2 in enumerate(unique_points):
             if i != j:
-                # 检查两点之间的路径是否安全
                 if is_path_safe(p1, p2, high_obstacles, flight_altitude):
                     distance = calculate_distance(p1, p2)
                     graph[i].append((j, distance))
     
     # 找到起点和终点的索引
-    start_idx = candidate_points.index(start)
-    end_idx = candidate_points.index(end)
+    start_idx = unique_points.index(start)
+    end_idx = unique_points.index(end)
     
-    # Dijkstra算法找最短路径
-    distances = [float('inf')] * len(candidate_points)
+    # Dijkstra算法
+    distances = [float('inf')] * len(unique_points)
     distances[start_idx] = 0
-    previous = [-1] * len(candidate_points)
-    visited = [False] * len(candidate_points)
+    previous = [-1] * len(unique_points)
+    visited = [False] * len(unique_points)
     
-    for _ in range(len(candidate_points)):
-        # 找到未访问中距离最小的节点
+    for _ in range(len(unique_points)):
         min_dist = float('inf')
         min_idx = -1
-        for i in range(len(candidate_points)):
+        for i in range(len(unique_points)):
             if not visited[i] and distances[i] < min_dist:
                 min_dist = distances[i]
                 min_idx = i
@@ -290,7 +282,6 @@ def find_path_between_obstacles(start, end, obstacles, flight_altitude, safety_r
         
         visited[min_idx] = True
         
-        # 更新邻居
         for neighbor, weight in graph[min_idx]:
             if not visited[neighbor]:
                 new_dist = distances[min_idx] + weight
@@ -298,9 +289,7 @@ def find_path_between_obstacles(start, end, obstacles, flight_altitude, safety_r
                     distances[neighbor] = new_dist
                     previous[neighbor] = min_idx
     
-    # 重建路径
     if distances[end_idx] == float('inf'):
-        # 如果找不到路径，使用简单的绕行
         return [start, end]
     
     path_indices = []
@@ -309,14 +298,12 @@ def find_path_between_obstacles(start, end, obstacles, flight_altitude, safety_r
         path_indices.insert(0, current)
         current = previous[current]
     
-    # 获取路径点
-    path = [candidate_points[i] for i in path_indices]
+    path = [unique_points[i] for i in path_indices]
     
     # 简化路径
     simplified = [path[0]]
     i = 0
     while i < len(path) - 1:
-        # 尝试跳过中间点
         for j in range(len(path) - 1, i, -1):
             if j > i + 1:
                 if is_path_safe(path[i], path[j], high_obstacles, flight_altitude):
@@ -347,7 +334,6 @@ def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
             waypoints.append(end)
             break
         
-        # 找到阻挡的障碍物
         blocking = None
         for obs in high_obstacles:
             if line_intersects_polygon(current, end, obs["polygon"]):
@@ -360,7 +346,6 @@ def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
             min_lng = bounds[2]
             center_lat = (bounds[0] + bounds[1]) / 2
             
-            # 计算向左偏移
             offset_meters = safety_radius * 1.5
             offset_lng = offset_meters / (111320 * math.cos(math.radians(center_lat)))
             
@@ -392,7 +377,6 @@ def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
             waypoints.append(end)
             break
         
-        # 找到阻挡的障碍物
         blocking = None
         for obs in high_obstacles:
             if line_intersects_polygon(current, end, obs["polygon"]):
@@ -405,7 +389,6 @@ def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
             max_lng = bounds[3]
             center_lat = (bounds[0] + bounds[1]) / 2
             
-            # 计算向右偏移
             offset_meters = safety_radius * 1.5
             offset_lng = offset_meters / (111320 * math.cos(math.radians(center_lat)))
             
@@ -486,15 +469,18 @@ def start_mission():
     st.session_state.mission_start_time = datetime.now()
     st.session_state.current_position = st.session_state.current_route[0]
     st.session_state.battery_level = 100
+    st.session_state.auto_progress_enabled = True
     
     add_flight_log("任务开始", f"航线共 {len(st.session_state.current_route)} 个航点")
 
 def pause_mission():
     st.session_state.mission_paused = True
+    st.session_state.auto_progress_enabled = False
     add_flight_log("任务暂停", f"当前航点: {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)}")
 
 def resume_mission():
     st.session_state.mission_paused = False
+    st.session_state.auto_progress_enabled = True
     add_flight_log("任务恢复", "")
 
 def stop_mission():
@@ -503,6 +489,7 @@ def stop_mission():
     st.session_state.current_waypoint_index = 0
     st.session_state.mission_start_time = None
     st.session_state.current_position = None
+    st.session_state.auto_progress_enabled = False
     add_flight_log("任务停止", f"总飞行时间: {format_time(get_elapsed_time())}")
 
 def reset_mission():
@@ -518,30 +505,38 @@ def add_flight_log(action, details):
     if len(st.session_state.flight_log) > 50:
         st.session_state.flight_log = st.session_state.flight_log[:50]
 
-def advance_mission():
-    """推进任务进度"""
+def auto_progress_mission():
+    """自动推进任务进度"""
     if not st.session_state.mission_active or st.session_state.mission_paused:
         return False
     
     if not st.session_state.current_route:
         return False
     
+    # 检查是否完成所有航点
     if st.session_state.current_waypoint_index >= len(st.session_state.current_route):
         st.session_state.mission_active = False
+        st.session_state.auto_progress_enabled = False
         add_flight_log("任务完成", f"总飞行时间: {format_time(get_elapsed_time())}")
         return False
     
+    # 更新当前位置
     current_wp = st.session_state.current_route[st.session_state.current_waypoint_index]
     st.session_state.current_position = current_wp
     
+    # 模拟电量消耗
     st.session_state.battery_level = max(0, st.session_state.battery_level - random.uniform(0.5, 1.5))
     
+    # 记录到达航点
     add_flight_log("航点到达", f"航点 {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)}")
     
+    # 前进到下一个航点
     st.session_state.current_waypoint_index += 1
     
+    # 检查是否完成
     if st.session_state.current_waypoint_index >= len(st.session_state.current_route):
         st.session_state.mission_active = False
+        st.session_state.auto_progress_enabled = False
         add_flight_log("任务完成", f"总飞行时间: {format_time(get_elapsed_time())}")
     
     return True
@@ -655,6 +650,15 @@ def create_map(show_flight=True, key_suffix=""):
         ).add_to(m)
     
     return m
+
+# ====================== 自动飞行循环 ======================
+if st.session_state.auto_progress_enabled and st.session_state.mission_active and not st.session_state.mission_paused:
+    # 检查上次更新时间，控制飞行速度
+    now = time.time()
+    if st.session_state.last_update_time is None or (now - st.session_state.last_update_time) >= 1.5:
+        st.session_state.last_update_time = now
+        auto_progress_mission()
+        st.rerun()
 
 # ====================== 页面布局 ======================
 tab1, tab2, tab3 = st.tabs(["🗺️ 地图与航线规划", "📡 飞行任务监控", "📊 飞行日志与遥测"])
@@ -916,18 +920,8 @@ with tab2:
             reset_mission()
             st.rerun()
     with col_ctl5:
-        status_text = "✅ 执行中" if st.session_state.mission_active and not st.session_state.mission_paused else "⏸️ 已暂停" if st.session_state.mission_paused else "⏹️ 未开始"
+        status_text = "✅ 飞行中" if st.session_state.mission_active and not st.session_state.mission_paused else "⏸️ 已暂停" if st.session_state.mission_paused else "⏹️ 未开始"
         st.button(status_text, use_container_width=True, disabled=True)
-    
-    st.divider()
-    
-    if st.session_state.mission_active and not st.session_state.mission_paused:
-        col_adv1, col_adv2, col_adv3 = st.columns([1, 2, 1])
-        with col_adv2:
-            if st.button("✈️ 前进到下一航点", use_container_width=True, type="primary"):
-                advance_mission()
-                st.rerun()
-        st.info("💡 点击「前进到下一航点」按钮模拟无人机飞行")
     
     st.divider()
     
@@ -1099,4 +1093,4 @@ if st.session_state.heartbeat_running:
 
 # ====================== 页脚 ======================
 st.markdown("---")
-st.markdown("🚁 无人机航线规划与飞行监控系统 | 智能穿行模式会自动寻找障碍物之间的安全通道")
+st.markdown("🚁 无人机航线规划与飞行监控系统 | 智能穿行模式会自动寻找障碍物之间的安全通道 | 开始任务后无人机将自主飞行")
