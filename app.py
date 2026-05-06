@@ -8,7 +8,6 @@ from datetime import datetime
 import pandas as pd
 import math
 import random
-import time
 
 # ====================== 页面配置 ======================
 st.set_page_config(
@@ -63,8 +62,8 @@ if "flight_log" not in st.session_state:
     st.session_state.flight_log = []
 if "current_position" not in st.session_state:
     st.session_state.current_position = None
-if "last_tick" not in st.session_state:
-    st.session_state.last_tick = 0
+if "auto_advance" not in st.session_state:
+    st.session_state.auto_advance = False
 
 # ====================== 通信链路状态 ======================
 if "gcs_status" not in st.session_state:
@@ -351,6 +350,25 @@ def add_flight_log(action, details, level="info"):
     if len(st.session_state.flight_log) > 50:
         st.session_state.flight_log = st.session_state.flight_log[:50]
 
+def advance_waypoint():
+    """手动前进一个航点"""
+    if not st.session_state.current_route:
+        return
+    
+    if st.session_state.current_waypoint_index < len(st.session_state.current_route) - 1:
+        st.session_state.current_waypoint_index += 1
+        st.session_state.current_position = st.session_state.current_route[st.session_state.current_waypoint_index]
+        st.session_state.battery_level = max(0, st.session_state.battery_level - random.uniform(0.5, 1.0))
+        add_flight_log("航点到达", f"航点 {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)-1}", "info")
+        
+        if st.session_state.current_waypoint_index >= len(st.session_state.current_route) - 1:
+            st.session_state.mission_active = False
+            st.session_state.auto_advance = False
+            add_flight_log("任务完成", f"总飞行时间: {format_time(get_elapsed_time())}", "success")
+    else:
+        st.session_state.mission_active = False
+        st.session_state.auto_advance = False
+
 def start_mission():
     if not st.session_state.current_route:
         st.toast("❌ 请先规划航线", icon="❌")
@@ -362,22 +380,24 @@ def start_mission():
     st.session_state.mission_start_time = datetime.now()
     st.session_state.current_position = st.session_state.current_route[0]
     st.session_state.battery_level = 100
-    st.session_state.last_tick = time.time()
+    st.session_state.auto_advance = True
     
     add_flight_log("任务开始", f"航线共 {len(st.session_state.current_route)-1} 个航段", "success")
 
 def pause_mission():
     st.session_state.mission_paused = True
+    st.session_state.auto_advance = False
     add_flight_log("任务暂停", "", "warning")
 
 def resume_mission():
     st.session_state.mission_paused = False
-    st.session_state.last_tick = time.time()
+    st.session_state.auto_advance = True
     add_flight_log("任务恢复", "", "success")
 
 def stop_mission():
     st.session_state.mission_active = False
     st.session_state.mission_paused = False
+    st.session_state.auto_advance = False
     st.session_state.current_waypoint_index = 0
     st.session_state.mission_start_time = None
     st.session_state.current_position = st.session_state.current_route[0] if st.session_state.current_route else None
@@ -389,26 +409,6 @@ def reset_mission():
     st.session_state.current_position = st.session_state.current_route[0] if st.session_state.current_route else None
     st.session_state.battery_level = 100
     add_flight_log("任务重置", "", "info")
-
-# ====================== 自动飞行推进 ======================
-if st.session_state.mission_active and not st.session_state.mission_paused:
-    current_time = time.time()
-    if current_time - st.session_state.last_tick >= 1.5:
-        st.session_state.last_tick = current_time
-        
-        if st.session_state.current_waypoint_index < len(st.session_state.current_route) - 1:
-            st.session_state.current_waypoint_index += 1
-            st.session_state.current_position = st.session_state.current_route[st.session_state.current_waypoint_index]
-            st.session_state.battery_level = max(0, st.session_state.battery_level - random.uniform(0.5, 1.0))
-            add_flight_log("航点到达", f"航点 {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)-1}", "info")
-            
-            if st.session_state.current_waypoint_index >= len(st.session_state.current_route) - 1:
-                st.session_state.mission_active = False
-                add_flight_log("任务完成", f"总飞行时间: {format_time(get_elapsed_time())}", "success")
-            
-            st.rerun()
-        else:
-            st.session_state.mission_active = False
 
 # ====================== 创建地图 ======================
 def create_map(show_flight=True):
@@ -538,6 +538,46 @@ def create_map(show_flight=True):
     
     return m
 
+# ====================== 自动前进的JavaScript代码 ======================
+auto_advance_js = """
+<script>
+    let intervalId = null;
+    
+    function startAutoAdvance() {
+        if (intervalId) clearInterval(intervalId);
+        intervalId = setInterval(function() {
+            // 找到并点击前进按钮
+            const buttons = document.querySelectorAll('button');
+            for (let btn of buttons) {
+                if (btn.innerText.includes('➡️ 前进') || btn.innerText.includes('前进')) {
+                    btn.click();
+                    break;
+                }
+            }
+        }, 1500);
+    }
+    
+    function stopAutoAdvance() {
+        if (intervalId) {
+            clearInterval(intervalId);
+            intervalId = null;
+        }
+    }
+    
+    // 监听Streamlit状态变化
+    const observer = new MutationObserver(function() {
+        const statusBtn = document.querySelector('button[kind="secondary"]');
+        if (statusBtn && statusBtn.innerText.includes('自主飞行中')) {
+            startAutoAdvance();
+        } else {
+            stopAutoAdvance();
+        }
+    });
+    
+    observer.observe(document.body, { childList: true, subtree: true });
+</script>
+"""
+
 # ====================== 页面布局 ======================
 tab1, tab2, tab3 = st.tabs(["🗺️ 地图与航线规划", "📡 飞行任务监控", "📊 飞行日志与遥测"])
 
@@ -545,23 +585,23 @@ tab1, tab2, tab3 = st.tabs(["🗺️ 地图与航线规划", "📡 飞行任务�
 with tab1:
     col_btn1, col_btn2, col_btn3, col_btn4, col_btn5 = st.columns(5)
     with col_btn1:
-        if st.button("🎯 规划航线", use_container_width=True, type="primary"):
+        if st.button("🎯 规划航线", key="plan_route_btn", use_container_width=True, type="primary"):
             plan_route()
             save_data()
             st.success("航线规划完成！")
     with col_btn2:
-        if st.button("💾 保存数据", use_container_width=True):
+        if st.button("💾 保存数据", key="save_data_btn", use_container_width=True):
             save_data()
             st.success("已保存")
     with col_btn3:
-        if st.button("🗑️ 清空障碍物", use_container_width=True):
+        if st.button("🗑️ 清空障碍物", key="clear_obs_btn", use_container_width=True):
             st.session_state.obstacles = []
             st.session_state.current_route = []
             st.session_state.current_waypoint_index = 0
             save_data()
             st.success("已清空")
     with col_btn4:
-        if st.button("🗺️ 重置视图", use_container_width=True):
+        if st.button("🗺️ 重置视图", key="reset_view_btn", use_container_width=True):
             st.session_state.map_center = [32.2341, 118.7494]
             st.session_state.start_point = (32.2345, 118.7492)
             st.session_state.end_point = (32.2337, 118.7496)
@@ -571,7 +611,7 @@ with tab1:
             save_data()
             st.success("已重置")
     with col_btn5:
-        if st.button("❌ 取消模式", use_container_width=True):
+        if st.button("❌ 取消模式", key="cancel_mode_btn", use_container_width=True):
             st.session_state.set_mode = None
             st.success("已退出坐标设置模式")
     
@@ -637,7 +677,7 @@ with tab1:
                 
                 col_btn_a, col_btn_b = st.columns(2)
                 with col_btn_a:
-                    if st.button("✅ 确认添加", use_container_width=True, key="confirm_add"):
+                    if st.button("✅ 确认添加", key="confirm_add_obs", use_container_width=True):
                         new_obs = {
                             "name": obs_name,
                             "height": obs_height,
@@ -651,7 +691,7 @@ with tab1:
                         st.success(f"✅ 已添加障碍物: {obs_name}")
                         st.rerun()
                 with col_btn_b:
-                    if st.button("❌ 取消", use_container_width=True, key="cancel_add"):
+                    if st.button("❌ 取消", key="cancel_add_obs", use_container_width=True):
                         st.session_state.pending_polygon = None
                         st.rerun()
     
@@ -678,11 +718,11 @@ with tab1:
         
         col_set1, col_set2 = st.columns(2)
         with col_set1:
-            if st.button("📍 设置起点", use_container_width=True, key="set_start"):
+            if st.button("📍 设置起点", key="set_start_btn", use_container_width=True):
                 st.session_state.set_mode = 'start'
                 st.toast("🔴 请点击地图设置起点", icon="🔴")
         with col_set2:
-            if st.button("🏁 设置终点", use_container_width=True, key="set_end"):
+            if st.button("🏁 设置终点", key="set_end_btn", use_container_width=True):
                 st.session_state.set_mode = 'end'
                 st.toast("🟢 请点击地图设置终点", icon="🟢")
         
@@ -695,7 +735,7 @@ with tab1:
             with col_s2:
                 new_start_lng = st.number_input("经度", value=st.session_state.start_point[1], format="%.6f", key="start_lng")
             
-            if st.button("✈️ 更新起点", use_container_width=True, key="update_start"):
+            if st.button("✈️ 更新起点", key="update_start_btn", use_container_width=True):
                 st.session_state.start_point = (new_start_lat, new_start_lng)
                 st.session_state.current_route = []
                 save_data()
@@ -708,7 +748,7 @@ with tab1:
             with col_e2:
                 new_end_lng = st.number_input("经度", value=st.session_state.end_point[1], format="%.6f", key="end_lng")
             
-            if st.button("🎯 更新终点", use_container_width=True, key="update_end"):
+            if st.button("🎯 更新终点", key="update_end_btn", use_container_width=True):
                 st.session_state.end_point = (new_end_lat, new_end_lng)
                 st.session_state.current_route = []
                 save_data()
@@ -720,7 +760,7 @@ with tab1:
             "✈️ 飞行高度（米）",
             min_value=0.0, max_value=100.0,
             value=st.session_state.flight_altitude, step=1.0,
-            key="altitude"
+            key="altitude_input"
         )
         if new_altitude != st.session_state.flight_altitude:
             st.session_state.flight_altitude = new_altitude
@@ -731,7 +771,7 @@ with tab1:
             "🛡️ 安全半径（米）",
             min_value=5.0, max_value=30.0,
             value=st.session_state.safety_radius, step=2.0,
-            key="radius"
+            key="radius_input"
         )
         if new_radius != st.session_state.safety_radius:
             st.session_state.safety_radius = new_radius
@@ -753,7 +793,7 @@ with tab1:
                     else:
                         st.markdown(f"**🟢 {name}** | {height}m (可飞越)")
                 with col_b:
-                    if st.button("🗑️", key=f"del_{i}"):
+                    if st.button("🗑️", key=f"del_obs_{i}", use_container_width=True):
                         st.session_state.obstacles.pop(i)
                         st.session_state.current_route = []
                         st.session_state.current_waypoint_index = 0
@@ -773,45 +813,51 @@ with tab1:
 with tab2:
     st.subheader("🎮 飞行任务控制")
     
-    # 控制按钮区域
     col_ctl1, col_ctl2, col_ctl3, col_ctl4, col_ctl5 = st.columns(5)
     with col_ctl1:
         if not st.session_state.mission_active:
-            if st.button("▶️ 开始任务", key="btn_start", use_container_width=True, type="primary"):
+            if st.button("▶️ 开始任务", key="start_mission_btn", use_container_width=True, type="primary"):
                 start_mission()
                 st.rerun()
         else:
-            st.button("✅ 执行中", key="btn_flying", use_container_width=True, disabled=True)
+            st.button("✅ 自主飞行中", key="flying_status_btn", use_container_width=True, disabled=True)
     
     with col_ctl2:
         if st.session_state.mission_active and not st.session_state.mission_paused:
-            if st.button("⏸️ 暂停", key="btn_pause", use_container_width=True):
+            if st.button("⏸️ 暂停", key="pause_btn", use_container_width=True):
                 pause_mission()
                 st.rerun()
         elif st.session_state.mission_paused:
-            if st.button("▶️ 恢复", key="btn_resume", use_container_width=True):
+            if st.button("▶️ 恢复", key="resume_btn", use_container_width=True):
                 resume_mission()
                 st.rerun()
         else:
-            st.button("⏸️ 暂停", key="btn_pause_disabled", use_container_width=True, disabled=True)
+            st.button("⏸️ 暂停", key="pause_disabled_btn", use_container_width=True, disabled=True)
     
     with col_ctl3:
-        if st.button("⏹️ 停止", key="btn_stop", use_container_width=True):
+        if st.button("⏹️ 停止", key="stop_btn", use_container_width=True):
             stop_mission()
             st.rerun()
     
     with col_ctl4:
-        if st.button("🔄 重置", key="btn_reset", use_container_width=True):
+        if st.button("🔄 重置", key="reset_btn", use_container_width=True):
             reset_mission()
             st.rerun()
     
     with col_ctl5:
         if st.session_state.mission_paused:
-            st.button("⏸️ 已暂停", key="btn_status_paused", use_container_width=True, disabled=True)
+            st.button("⏸️ 已暂停", key="status_paused_btn", use_container_width=True, disabled=True)
         elif not st.session_state.mission_active:
-            st.button("⏹️ 未开始", key="btn_status_idle", use_container_width=True, disabled=True)
+            st.button("⏹️ 未开始", key="status_idle_btn", use_container_width=True, disabled=True)
         else:
-            st.button("✅ 执行中", key="btn_status_flying", use_container_width=True, disabled=True)
+            st.button("✈️ 飞行中", key="status_flying_btn", use_container_width=True, disabled=True)
+    
+    # 手动前进按钮（被JS自动点击）
+    col_adv1, col_adv2, col_adv3 = st.columns([1, 2, 1])
+    with col_adv2:
+        if st.button("➡️ 前进到下一航点", key="advance_btn", use_container_width=True):
+            advance_waypoint()
+            st.rerun()
     
     st.divider()
     
@@ -856,22 +902,22 @@ with tab2:
     
     st.divider()
     
-    # 通信链路拓扑与数据流
+    # 通信链路拓扑与数据流（完全按照图片样式）
     st.subheader("📡 通信链路拓扑与数据流")
     
     col_link1, col_link2, col_link3 = st.columns(3)
     
     with col_link1:
-        st.markdown("**GCS**")
-        st.markdown("🟢 在线")
+        st.markdown(f"**GCS**")
+        st.markdown(f"🟢 {st.session_state.gcs_status}")
     
     with col_link2:
-        st.markdown("**OBC**")
-        st.markdown("🟢 在线")
+        st.markdown(f"**OBC**")
+        st.markdown(f"🟢 {st.session_state.obc_status}")
     
     with col_link3:
-        st.markdown("**FCU**")
-        st.markdown("🟢 在线")
+        st.markdown(f"**FCU**")
+        st.markdown(f"🟢 {st.session_state.fcu_status}")
     
     st.caption("🔗 数据链路: GCS ↔ OBC ↔ FCU")
     
@@ -890,6 +936,22 @@ with tab2:
         if st.session_state.mission_active and not st.session_state.mission_paused:
             remaining_time = get_estimated_arrival_time()
             st.caption(f"预计剩余时间: {format_time(remaining_time)}")
+    
+    # 注入自动点击的JavaScript
+    if st.session_state.mission_active and not st.session_state.mission_paused:
+        st.components.v1.html("""
+        <script>
+            setTimeout(function() {
+                const buttons = document.querySelectorAll('button');
+                for (let btn of buttons) {
+                    if (btn.innerText.includes('前进')) {
+                        btn.click();
+                        break;
+                    }
+                }
+            }, 1500);
+        </script>
+        """, height=0)
 
 # ====================== 标签页3 ======================
 with tab3:
@@ -898,7 +960,7 @@ with tab3:
     with col_log1:
         st.subheader("📝 飞行日志")
         
-        if st.button("🗑️ 清空日志", use_container_width=True):
+        if st.button("🗑️ 清空日志", key="clear_log_btn", use_container_width=True):
             st.session_state.flight_log = []
             st.rerun()
         
@@ -950,16 +1012,16 @@ with tab3:
         col_heart1, col_heart2 = st.columns(2)
         with col_heart1:
             if not st.session_state.heartbeat_running:
-                if st.button("▶️ 开始心跳", use_container_width=True):
+                if st.button("▶️ 开始心跳", key="start_heartbeat_btn", use_container_width=True):
                     st.session_state.heartbeat_running = True
                     st.rerun()
             else:
-                if st.button("⏸️ 停止心跳", use_container_width=True):
+                if st.button("⏸️ 停止心跳", key="stop_heartbeat_btn", use_container_width=True):
                     st.session_state.heartbeat_running = False
                     st.rerun()
         
         with col_heart2:
-            if st.button("📡 发送心跳", use_container_width=True):
+            if st.button("📡 发送心跳", key="send_heartbeat_btn", use_container_width=True):
                 new_seq = len(st.session_state.heartbeat_history) + 1
                 st.session_state.heartbeat_history.append({
                     "seq": new_seq,
@@ -984,7 +1046,6 @@ if st.session_state.heartbeat_running:
             "time": now.strftime("%H:%M:%S"),
             "status": "正常"
         })
-        time.sleep(0.5)
         st.rerun()
     else:
         last_time = datetime.strptime(st.session_state.heartbeat_history[-1]["time"], "%H:%M:%S")
@@ -994,9 +1055,8 @@ if st.session_state.heartbeat_running:
                 "time": now.strftime("%H:%M:%S"),
                 "status": "正常"
             })
-            time.sleep(0.5)
             st.rerun()
 
 # ====================== 页脚 ======================
 st.markdown("---")
-st.markdown("🚁 无人机航线规划与飞行监控系统 | 智能穿行模式自动寻找安全通道 | 开始任务后每1.5秒自动飞行一个航点")
+st.markdown("🚁 无人机航线规划与飞行监控系统 | 智能穿行模式自动寻找安全通道 | 开始任务后自动每1.5秒前进一个航点")
