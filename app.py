@@ -8,7 +8,6 @@ from datetime import datetime
 import pandas as pd
 import math
 import random
-import time
 
 # ====================== 页面配置 ======================
 st.set_page_config(
@@ -181,10 +180,10 @@ def get_bypass_points_around_obstacle(polygon, safety_radius):
     offset_lng = offset_meters / (111320 * math.cos(math.radians(center_lat)))
     
     points = []
-    points.append((min_lat - offset_lat, center_lng))  # 上
-    points.append((max_lat + offset_lat, center_lng))  # 下
-    points.append((center_lat, min_lng - offset_lng))  # 左
-    points.append((center_lat, max_lng + offset_lng))  # 右
+    points.append((min_lat - offset_lat, center_lng))
+    points.append((max_lat + offset_lat, center_lng))
+    points.append((center_lat, min_lng - offset_lng))
+    points.append((center_lat, max_lng + offset_lng))
     return points
 
 def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
@@ -385,26 +384,6 @@ def add_log(action, details, level="info"):
     if len(st.session_state.flight_log) > 50:
         st.session_state.flight_log = st.session_state.flight_log[:50]
 
-def advance_one_waypoint():
-    if not st.session_state.current_route:
-        return False
-    
-    if st.session_state.current_waypoint_index >= len(st.session_state.current_route) - 1:
-        st.session_state.mission_active = False
-        add_log("任务完成", f"总时间: {format_time(get_elapsed())}", "success")
-        return False
-    
-    st.session_state.current_waypoint_index += 1
-    st.session_state.current_position = st.session_state.current_route[st.session_state.current_waypoint_index]
-    st.session_state.battery_level = max(0, st.session_state.battery_level - random.uniform(0.3, 0.8))
-    add_log("航点到达", f"航点 {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)-1}", "info")
-    
-    if st.session_state.current_waypoint_index >= len(st.session_state.current_route) - 1:
-        st.session_state.mission_active = False
-        add_log("任务完成", f"总时间: {format_time(get_elapsed())}", "success")
-    
-    return True
-
 def start_mission():
     if not st.session_state.current_route:
         st.toast("❌ 请先规划航线", icon="❌")
@@ -443,12 +422,29 @@ def reset_mission():
     st.session_state.battery_level = 100
     add_log("任务重置", "", "info")
 
-# ====================== 自动飞行控制 ======================
+# ====================== 自动飞行的核心代码 ======================
+# 每次页面刷新时，检查是否需要前进到下一个航点
+import time
+current_time = time.time()
+
 if st.session_state.mission_active and not st.session_state.mission_paused:
-    current_time = time.time()
-    if current_time - st.session_state.last_auto_time >= 1.2:
+    # 每1.5秒前进一个航点
+    if st.session_state.last_auto_time == 0:
         st.session_state.last_auto_time = current_time
-        advance_one_waypoint()
+    elif current_time - st.session_state.last_auto_time >= 1.5:
+        st.session_state.last_auto_time = current_time
+        
+        if st.session_state.current_waypoint_index < len(st.session_state.current_route) - 1:
+            st.session_state.current_waypoint_index += 1
+            st.session_state.current_position = st.session_state.current_route[st.session_state.current_waypoint_index]
+            st.session_state.battery_level = max(0, st.session_state.battery_level - random.uniform(0.3, 0.8))
+            add_log("航点到达", f"航点 {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)-1}", "info")
+            
+            if st.session_state.current_waypoint_index >= len(st.session_state.current_route) - 1:
+                st.session_state.mission_active = False
+                add_log("任务完成", f"总时间: {format_time(get_elapsed())}", "success")
+        
+        # 刷新页面
         st.rerun()
 
 # ====================== 创建地图 ======================
@@ -911,7 +907,6 @@ if st.session_state.heartbeat_running:
             "time": now.strftime("%H:%M:%S"),
             "status": "正常"
         })
-        time.sleep(0.5)
         st.rerun()
     else:
         last = datetime.strptime(st.session_state.heartbeat_history[-1]["time"], "%H:%M:%S")
@@ -921,9 +916,8 @@ if st.session_state.heartbeat_running:
                 "time": now.strftime("%H:%M:%S"),
                 "status": "正常"
             })
-            time.sleep(0.5)
             st.rerun()
 
 # ====================== 页脚 ======================
 st.markdown("---")
-st.markdown("🚁 无人机航线规划与飞行监控系统 | 开始任务后自动每1.2秒飞行一个航点")
+st.markdown("🚁 无人机航线规划与飞行监控系统 | 开始任务后自动每1.5秒飞行一个航点")
