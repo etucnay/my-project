@@ -9,7 +9,6 @@ import pandas as pd
 import math
 import random
 import time
-import threading
 
 # ====================== 页面配置 ======================
 st.set_page_config(
@@ -70,10 +69,10 @@ if "current_position" not in st.session_state:
     st.session_state.current_position = None
 if "telemetry_data" not in st.session_state:
     st.session_state.telemetry_data = []
-if "auto_fly" not in st.session_state:
-    st.session_state.auto_fly = False
-if "fly_thread" not in st.session_state:
-    st.session_state.fly_thread = None
+if "is_flying" not in st.session_state:
+    st.session_state.is_flying = False
+if "flying_animation" not in st.session_state:
+    st.session_state.flying_animation = False
 
 # ====================== 通信链路状态 ======================
 if "gcs_status" not in st.session_state:
@@ -362,21 +361,72 @@ def add_flight_log(action, details, level="info"):
     if len(st.session_state.flight_log) > 50:
         st.session_state.flight_log = st.session_state.flight_log[:50]
 
-def advance_one_waypoint():
-    """前进一个航点"""
+def start_mission():
+    if not st.session_state.current_route:
+        st.toast("❌ 请先规划航线", icon="❌")
+        return
+    
+    st.session_state.mission_active = True
+    st.session_state.mission_paused = False
+    st.session_state.current_waypoint_index = 0
+    st.session_state.mission_start_time = datetime.now()
+    st.session_state.current_position = st.session_state.current_route[0]
+    st.session_state.battery_level = 100
+    st.session_state.is_flying = True
+    
+    add_flight_log("任务开始", f"航线共 {len(st.session_state.current_route)} 个航点", "success")
+
+def pause_mission():
+    st.session_state.mission_paused = True
+    st.session_state.is_flying = False
+    add_flight_log("任务暂停", "", "warning")
+
+def resume_mission():
+    st.session_state.mission_paused = False
+    st.session_state.is_flying = True
+    add_flight_log("任务恢复", "", "success")
+
+def stop_mission():
+    st.session_state.mission_active = False
+    st.session_state.mission_paused = False
+    st.session_state.is_flying = False
+    st.session_state.current_waypoint_index = 0
+    st.session_state.mission_start_time = None
+    st.session_state.current_position = st.session_state.current_route[0] if st.session_state.current_route else None
+    add_flight_log("任务停止", "", "error")
+
+def reset_mission():
+    stop_mission()
+    st.session_state.current_waypoint_index = 0
+    st.session_state.current_position = st.session_state.current_route[0] if st.session_state.current_route else None
+    st.session_state.battery_level = 100
+    add_flight_log("任务重置", "", "info")
+
+def advance_to_next_waypoint():
+    """前进到下一个航点"""
     if not st.session_state.current_route:
         return False
     
     if st.session_state.current_waypoint_index >= len(st.session_state.current_route) - 1:
-        # 已经到达最后一个航点，任务完成
         st.session_state.mission_active = False
-        st.session_state.auto_fly = False
+        st.session_state.is_flying = False
         add_flight_log("任务完成", f"总飞行时间: {format_time(get_elapsed_time())}", "success")
         return False
     
     # 前进到下一个航点
     st.session_state.current_waypoint_index += 1
     st.session_state.current_position = st.session_state.current_route[st.session_state.current_waypoint_index]
+    
+    # 计算距离
+    if st.session_state.current_waypoint_index > 0:
+        dist = calculate_distance(
+            st.session_state.current_route[st.session_state.current_waypoint_index - 1],
+            st.session_state.current_position
+        )
+        # 模拟飞行时间
+        flight_time = dist / st.session_state.flight_speed
+    else:
+        flight_time = 1.2
     
     # 模拟电量消耗
     st.session_state.battery_level = max(0, st.session_state.battery_level - random.uniform(0.5, 1.0))
@@ -390,56 +440,26 @@ def advance_one_waypoint():
     st.session_state.signal_strength = max(-85, min(-55, st.session_state.signal_strength + random.uniform(-1, 1)))
     st.session_state.data_rate = random.randint(80, 150)
     
+    # 添加遥测数据
+    st.session_state.telemetry_data.insert(0, {
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "waypoint": st.session_state.current_waypoint_index,
+        "lat": f"{st.session_state.current_position[0]:.6f}",
+        "lng": f"{st.session_state.current_position[1]:.6f}",
+        "altitude": st.session_state.flight_altitude,
+        "speed": st.session_state.flight_speed,
+        "battery": f"{st.session_state.battery_level:.1f}%"
+    })
+    if len(st.session_state.telemetry_data) > 20:
+        st.session_state.telemetry_data = st.session_state.telemetry_data[:20]
+    
     # 检查是否完成
     if st.session_state.current_waypoint_index >= len(st.session_state.current_route) - 1:
         st.session_state.mission_active = False
-        st.session_state.auto_fly = False
+        st.session_state.is_flying = False
         add_flight_log("任务完成", f"总飞行时间: {format_time(get_elapsed_time())}", "success")
     
-    return True
-
-def start_auto_fly():
-    """启动自动飞行（在后台线程中运行）"""
-    if not st.session_state.current_route:
-        st.toast("❌ 请先规划航线", icon="❌")
-        return
-    
-    st.session_state.mission_active = True
-    st.session_state.mission_paused = False
-    st.session_state.mission_start_time = datetime.now()
-    st.session_state.auto_fly = True
-    st.session_state.current_waypoint_index = 0
-    st.session_state.current_position = st.session_state.current_route[0]
-    st.session_state.battery_level = 100
-    
-    add_flight_log("任务开始", f"航线共 {len(st.session_state.current_route)} 个航点", "success")
-
-def stop_auto_fly():
-    st.session_state.auto_fly = False
-    st.session_state.mission_active = False
-    st.session_state.mission_paused = False
-    add_flight_log("任务停止", "", "error")
-
-def pause_auto_fly():
-    st.session_state.mission_paused = True
-    st.session_state.auto_fly = False
-    add_flight_log("任务暂停", "", "warning")
-
-def resume_auto_fly():
-    st.session_state.mission_paused = False
-    st.session_state.mission_active = True
-    st.session_state.auto_fly = True
-    st.session_state.mission_start_time = datetime.now()
-    add_flight_log("任务恢复", "", "success")
-
-def reset_mission():
-    stop_auto_fly()
-    st.session_state.current_waypoint_index = 0
-    st.session_state.current_position = st.session_state.current_route[0] if st.session_state.current_route else None
-    st.session_state.battery_level = 100
-    st.session_state.link_quality = 98
-    st.session_state.packet_loss = 0
-    add_flight_log("任务重置", "", "info")
+    return flight_time
 
 # ====================== 创建地图 ======================
 def create_map(show_flight=True):
@@ -451,7 +471,7 @@ def create_map(show_flight=True):
     )
     
     # 绘图工具（仅当未飞行时显示）
-    if not st.session_state.mission_active and not st.session_state.auto_fly:
+    if not st.session_state.mission_active:
         draw = Draw(
             draw_options={
                 "polygon": {
@@ -508,14 +528,16 @@ def create_map(show_flight=True):
     
     # 航线
     if st.session_state.current_route:
+        # 完整航线（虚线）
         folium.PolyLine(
             locations=st.session_state.current_route,
             color="#00ff00",
-            weight=4,
-            opacity=0.8
+            weight=3,
+            opacity=0.6,
+            dash_array='5, 5'
         ).add_to(m)
         
-        # 已完成航段
+        # 已完成航段（实线）
         if show_flight and st.session_state.current_waypoint_index > 0:
             completed = st.session_state.current_route[:st.session_state.current_waypoint_index + 1]
             if len(completed) > 1:
@@ -535,12 +557,12 @@ def create_map(show_flight=True):
             else:
                 color = "orange"
             
-            if show_flight and i < st.session_state.current_waypoint_index:
+            if show_flight and i <= st.session_state.current_waypoint_index:
                 color = "lightgreen"
             
             folium.CircleMarker(
                 location=point,
-                radius=5,
+                radius=6,
                 color=color,
                 fill=True,
                 fill_opacity=0.8,
@@ -553,6 +575,16 @@ def create_map(show_flight=True):
             location=st.session_state.current_position,
             popup="✈️ 无人机当前位置",
             icon=folium.Icon(color="blue", icon="plane", prefix="fa")
+        ).add_to(m)
+        
+        # 添加飞行方向指示圆圈
+        folium.Circle(
+            location=st.session_state.current_position,
+            radius=15,
+            color="blue",
+            weight=2,
+            fill=True,
+            fill_opacity=0.3
         ).add_to(m)
         
         # 飞行方向线
@@ -587,6 +619,7 @@ with tab1:
         if st.button("🗑️ 清空障碍物", use_container_width=True):
             st.session_state.obstacles = []
             st.session_state.current_route = []
+            st.session_state.current_waypoint_index = 0
             save_data()
             st.success("已清空")
     with col_btn4:
@@ -596,6 +629,7 @@ with tab1:
             st.session_state.end_point = (32.2337, 118.7496)
             st.session_state.obstacles = []
             st.session_state.current_route = []
+            st.session_state.current_waypoint_index = 0
             save_data()
             st.success("已重置")
     with col_btn5:
@@ -777,13 +811,14 @@ with tab1:
                     height = obs.get('height', 0)
                     name = obs.get('name', '未知')
                     if height >= st.session_state.flight_altitude:
-                        st.markdown(f"**🔴 {name}** | {height}m")
+                        st.markdown(f"**🔴 {name}** | {height}m (需绕行)")
                     else:
-                        st.markdown(f"**🟢 {name}** | {height}m")
+                        st.markdown(f"**🟢 {name}** | {height}m (可飞越)")
                 with col_b:
                     if st.button("🗑️", key=f"del_{i}"):
                         st.session_state.obstacles.pop(i)
                         st.session_state.current_route = []
+                        st.session_state.current_waypoint_index = 0
                         save_data()
                         st.rerun()
         else:
@@ -802,30 +837,28 @@ with tab2:
     
     col_ctl1, col_ctl2, col_ctl3, col_ctl4, col_ctl5 = st.columns(5)
     with col_ctl1:
-        if not st.session_state.auto_fly and not st.session_state.mission_active:
+        if not st.session_state.mission_active:
             if st.button("🚁 开始自主飞行", use_container_width=True, type="primary"):
-                start_auto_fly()
+                start_mission()
                 st.rerun()
-        elif st.session_state.auto_fly:
-            st.button("✈️ 飞行中...", use_container_width=True, disabled=True)
         else:
-            st.button("⏹️ 已停止", use_container_width=True, disabled=True)
+            st.button("✈️ 飞行中...", use_container_width=True, disabled=True)
     
     with col_ctl2:
-        if st.session_state.auto_fly and not st.session_state.mission_paused:
+        if st.session_state.mission_active and not st.session_state.mission_paused:
             if st.button("⏸️ 暂停", use_container_width=True):
-                pause_auto_fly()
+                pause_mission()
                 st.rerun()
         elif st.session_state.mission_paused:
             if st.button("▶️ 恢复", use_container_width=True):
-                resume_auto_fly()
+                resume_mission()
                 st.rerun()
         else:
             st.button("⏸️ 暂停", use_container_width=True, disabled=True)
     
     with col_ctl3:
         if st.button("⏹️ 停止", use_container_width=True):
-            stop_auto_fly()
+            stop_mission()
             st.rerun()
     
     with col_ctl4:
@@ -834,7 +867,7 @@ with tab2:
             st.rerun()
     
     with col_ctl5:
-        if st.session_state.auto_fly and not st.session_state.mission_paused:
+        if st.session_state.mission_active and not st.session_state.mission_paused:
             status_text = "✅ 自主飞行中"
         elif st.session_state.mission_paused:
             status_text = "⏸️ 已暂停"
@@ -846,7 +879,7 @@ with tab2:
     
     st.divider()
     
-    # 飞行状态
+    # 飞行状态监控面板（仿照图片样式）
     st.subheader("📊 飞行实时状态")
     
     col_stat1, col_stat2, col_stat3, col_stat4, col_stat5, col_stat6 = st.columns(6)
@@ -877,52 +910,93 @@ with tab2:
     with col_stat6:
         battery = st.session_state.battery_level
         battery_color = "🟢" if battery > 30 else "🟡" if battery > 15 else "🔴"
-        st.metric("电量", f"{battery_color} {battery:.0f}%")
+        st.metric("电量模拟", f"{battery_color} {battery:.0f}%")
     
     st.divider()
     
-    # 实时地图
+    # 实时飞行地图
     st.subheader("🗺️ 实时飞行地图")
     flight_map = create_map(show_flight=True)
     st_folium(flight_map, width=900, height=450, returned_objects=[], key="monitor_map")
     
-    # 进度条
-    st.divider()
-    if st.session_state.current_route:
-        total_wp = len(st.session_state.current_route) - 1
-        current_wp = st.session_state.current_waypoint_index
-        progress = current_wp / total_wp if total_wp > 0 else 0
-        
-        st.progress(progress, text=f"✈️ 航线进度: {current_wp}/{total_wp} 航点")
-        
-        if st.session_state.auto_fly and not st.session_state.mission_paused:
-            st.caption(f"⏱️ 预计剩余时间: {format_time(get_estimated_arrival_time())}")
-    
     st.divider()
     
-    # 通信链路
+    # 通信链路拓扑与数据流（仿照图片样式）
     st.subheader("📡 通信链路拓扑与数据流")
     
     col_link1, col_link2, col_link3 = st.columns(3)
     
     with col_link1:
-        st.info(f"**地面站 (GCS)**\n\n🟢 在线")
+        gcs_color = "🟢" if st.session_state.gcs_status == "online" else "🔴"
+        st.info(f"**地面站 (GCS)**\n\n{gcs_color} 在线")
+    
     with col_link2:
-        st.info(f"**机载计算机 (OBC)**\n\n🟢 在线")
+        obc_color = "🟢" if st.session_state.obc_status == "online" else "🔴"
+        st.info(f"**机载计算机 (OBC)**\n\n{obc_color} 在线")
+    
     with col_link3:
-        st.info(f"**飞行控制单元 (FCU)**\n\n🟢 在线")
+        fcu_color = "🟢" if st.session_state.fcu_status == "online" else "🔴"
+        st.info(f"**飞行控制单元 (FCU)**\n\n{fcu_color} 在线")
+    
+    # 链路质量指示器
+    st.markdown("#### 数据链路质量")
     
     col_qual1, col_qual2, col_qual3, col_qual4 = st.columns(4)
+    
     with col_qual1:
-        st.metric("链路质量", f"{st.session_state.link_quality:.0f}%")
+        quality_color = "🟢" if st.session_state.link_quality > 90 else "🟡" if st.session_state.link_quality > 70 else "🔴"
+        st.metric("链路质量", f"{quality_color} {st.session_state.link_quality:.0f}%")
+    
     with col_qual2:
         st.metric("丢包率", f"{st.session_state.packet_loss:.1f}%")
+    
     with col_qual3:
         st.metric("信号强度", f"{st.session_state.signal_strength:.0f} dBm")
+    
     with col_qual4:
         st.metric("数据速率", f"{st.session_state.data_rate} kbps")
     
-    st.caption("🔗 数据链路: GCS <--MAVLink--> OBC <--UART--> FCU")
+    # 链路拓扑示意图
+    st.markdown("---")
+    st.markdown("#### 链路拓扑")
+    st.markdown("```\n    GCS (地面站)\n        ↕ MAVLink\n    OBC (机载计算机)\n        ↕ UART\n    FCU (飞行控制单元)\n```")
+    
+    # 数据流指示器
+    st.markdown("#### 实时数据流")
+    if st.session_state.mission_active:
+        st.markdown("📡 **遥测数据**: GPS | IMU | 气压计 | 磁力计 | 电池监控")
+        st.markdown("🔄 数据流状态: 正常传输中")
+        # 模拟数据流动画效果
+        st.progress(random.randint(30, 100), text="数据传输")
+    else:
+        st.markdown("📡 等待任务开始...")
+    
+    st.divider()
+    
+    # 飞行进度条
+    st.subheader("📈 任务进度")
+    
+    if st.session_state.current_route:
+        total_wp = len(st.session_state.current_route) - 1
+        current_wp = st.session_state.current_waypoint_index
+        progress = current_wp / total_wp if total_wp > 0 else 0
+        
+        st.progress(progress, text=f"✈️ 航点进度: {current_wp}/{total_wp}")
+        
+        if st.session_state.mission_active and not st.session_state.mission_paused:
+            remaining_time = get_estimated_arrival_time()
+            st.caption(f"⏱️ 预计剩余飞行时间: {format_time(remaining_time)}")
+        
+        # 航点列表
+        with st.expander("📋 航点列表"):
+            for i, wp in enumerate(st.session_state.current_route):
+                if i < st.session_state.current_waypoint_index:
+                    status = "✅"
+                elif i == st.session_state.current_waypoint_index:
+                    status = "⏳"
+                else:
+                    status = "⬜"
+                st.text(f"{status} 航点 {i+1}: ({wp[0]:.6f}, {wp[1]:.6f})")
 
 # ====================== 标签页3 ======================
 with tab3:
@@ -957,7 +1031,7 @@ with tab3:
             current_pos = "未起飞"
         
         telemetry_table = {
-            "参数": ["当前位置", "当前航点", "总航点数", "飞行速度", "飞行高度", "安全半径", "绕行模式", "电池电量", "已用时间", "剩余距离", "预计到达时间"],
+            "参数": ["当前位置", "当前航点", "总航点数", "飞行速度", "飞行高度", "安全半径", "绕行模式", "电池电量", "已用时间", "剩余距离", "预计到达时间", "链路质量", "丢包率"],
             "数值": [
                 current_pos,
                 f"{st.session_state.current_waypoint_index}",
@@ -969,7 +1043,9 @@ with tab3:
                 f"{st.session_state.battery_level:.1f}%",
                 format_time(get_elapsed_time()),
                 f"{calculate_remaining_distance(st.session_state.current_route, st.session_state.current_waypoint_index):.0f} m",
-                format_time(get_estimated_arrival_time())
+                format_time(get_estimated_arrival_time()),
+                f"{st.session_state.link_quality:.0f}%",
+                f"{st.session_state.packet_loss:.1f}%"
             ]
         }
         
@@ -978,35 +1054,20 @@ with tab3:
         
         st.divider()
         
-        # 心跳控制
-        st.subheader("💓 心跳检测")
-        
-        col_heart1, col_heart2 = st.columns(2)
-        with col_heart1:
-            if not st.session_state.heartbeat_running:
-                if st.button("▶️ 开始心跳", use_container_width=True):
-                    st.session_state.heartbeat_running = True
-                    st.rerun()
-            else:
-                if st.button("⏸️ 停止心跳", use_container_width=True):
-                    st.session_state.heartbeat_running = False
-                    st.rerun()
-        
-        with col_heart2:
-            if st.button("📡 发送心跳", use_container_width=True):
-                new_seq = len(st.session_state.heartbeat_history) + 1
-                st.session_state.heartbeat_history.append({
-                    "seq": new_seq,
-                    "time": datetime.now().strftime("%H:%M:%S"),
-                    "status": "正常"
-                })
-                st.rerun()
-        
-        if st.session_state.heartbeat_history:
-            df_heart = pd.DataFrame(st.session_state.heartbeat_history[-10:])
-            st.dataframe(df_heart, use_container_width=True, hide_index=True)
-        else:
-            st.info("暂无心跳数据")
+        # 遥测历史数据
+        if st.session_state.telemetry_data:
+            st.subheader("📈 遥测历史")
+            df_tele = pd.DataFrame(st.session_state.telemetry_data[:10])
+            st.dataframe(df_tele, use_container_width=True, hide_index=True)
+
+# ====================== 自动飞行循环 ======================
+# 当处于飞行状态时，每1.5秒自动前进一个航点
+if st.session_state.mission_active and not st.session_state.mission_paused:
+    if st.session_state.current_waypoint_index < len(st.session_state.current_route) - 1:
+        # 使用 time.sleep 实现延迟，然后自动前进
+        time.sleep(1.5)
+        advance_to_next_waypoint()
+        st.rerun()
 
 # ====================== 自动心跳 ======================
 if st.session_state.heartbeat_running:
@@ -1031,56 +1092,6 @@ if st.session_state.heartbeat_running:
             time.sleep(0.5)
             st.rerun()
 
-# ====================== 核心：自动飞行循环 ======================
-# 使用 JavaScript 定时器实现真正的自动连续飞行
-auto_fly_script = """
-<script>
-    let autoFlyInterval = null;
-    
-    function startAutoFly() {
-        if (autoFlyInterval) clearInterval(autoFlyInterval);
-        autoFlyInterval = setInterval(function() {
-            // 发送自动前进信号
-            const event = new CustomEvent('streamlit:autoFly', {
-                detail: { action: 'advance' }
-            });
-            window.dispatchEvent(event);
-        }, 1200);
-    }
-    
-    function stopAutoFly() {
-        if (autoFlyInterval) {
-            clearInterval(autoFlyInterval);
-            autoFlyInterval = null;
-        }
-    }
-    
-    // 监听来自Streamlit的消息
-    window.addEventListener('message', function(e) {
-        const data = e.data;
-        if (data && data.type === 'auto_fly_command') {
-            if (data.command === 'start') {
-                startAutoFly();
-            } else if (data.command === 'stop') {
-                stopAutoFly();
-            }
-        }
-    });
-</script>
-"""
-
-# 在页面底部注入JS脚本
-st.components.v1.html(auto_fly_script, height=0)
-
-# 处理自动前进
-if st.session_state.auto_fly and not st.session_state.mission_paused:
-    # 模拟自动前进（每1.2秒）
-    import time
-    time.sleep(0.1)
-    if st.session_state.current_waypoint_index < len(st.session_state.current_route) - 1:
-        advance_one_waypoint()
-        st.rerun()
-
 # ====================== 页脚 ======================
 st.markdown("---")
-st.markdown("🚁 无人机航线规划与飞行监控系统 | 点击「开始自主飞行」后，无人机会自动沿航线连续飞行")
+st.markdown("🚁 无人机航线规划与飞行监控系统 | 智能穿行模式自动寻找安全通道 | 开始自主飞行后无人机会逐点连续移动")
