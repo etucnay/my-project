@@ -166,8 +166,7 @@ def get_polygon_center(polygon):
 
 def is_path_safe(start, end, obstacles, flight_altitude):
     for obs in obstacles:
-        obs_height = obs.get("height", 0)
-        if obs_height >= flight_altitude:
+        if obs.get("height", 0) >= flight_altitude:
             polygon = obs.get("polygon", [])
             if polygon and line_intersects_polygon(start, end, polygon):
                 return False
@@ -394,7 +393,6 @@ def plan_route():
 
 # ====================== 辅助计算函数 ======================
 def calculate_total_distance(route):
-    """计算航线总距离"""
     if not route:
         return 0
     total = 0
@@ -403,7 +401,6 @@ def calculate_total_distance(route):
     return total
 
 def calculate_remaining_distance(route, current_index):
-    """计算剩余距离"""
     if not route or current_index >= len(route) - 1:
         return 0
     remaining = 0
@@ -474,26 +471,6 @@ def reset_mission():
     st.session_state.current_position = st.session_state.current_route[0] if st.session_state.current_route else None
     st.session_state.battery_level = 100
     add_log("任务重置", "", "info")
-
-# ====================== 自动飞行（逐点移动） ======================
-if st.session_state.mission_active and not st.session_state.mission_paused:
-    current_time = time.time()
-    if st.session_state.last_auto_time == 0:
-        st.session_state.last_auto_time = current_time
-    elif current_time - st.session_state.last_auto_time >= 1.5:
-        st.session_state.last_auto_time = current_time
-        
-        if st.session_state.current_waypoint_index < len(st.session_state.current_route) - 1:
-            st.session_state.current_waypoint_index += 1
-            st.session_state.current_position = st.session_state.current_route[st.session_state.current_waypoint_index]
-            st.session_state.battery_level = max(0, st.session_state.battery_level - random.uniform(0.3, 0.8))
-            add_log("航点到达", f"航点 {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)-1}", "info")
-            
-            if st.session_state.current_waypoint_index >= len(st.session_state.current_route) - 1:
-                st.session_state.mission_active = False
-                add_log("任务完成", f"总时间: {format_time(get_elapsed())}", "success")
-            
-            st.rerun()
 
 # ====================== 创建地图 ======================
 def create_map(show_flight=True):
@@ -1066,6 +1043,32 @@ if st.session_state.heartbeat_running:
                 "status": "正常"
             })
             time.sleep(0.5)
+            st.rerun()
+
+# ====================== 核心：自动飞行（逐点移动，每次刷新前进一个） ======================
+if st.session_state.mission_active and not st.session_state.mission_paused:
+    current_time = time.time()
+    
+    # 初始化计时器
+    if st.session_state.last_auto_time == 0:
+        st.session_state.last_auto_time = current_time
+    # 每1.5秒前进一个航点
+    elif current_time - st.session_state.last_auto_time >= 1.5:
+        st.session_state.last_auto_time = current_time
+        
+        # 前进一个航点
+        if st.session_state.current_waypoint_index < len(st.session_state.current_route) - 1:
+            st.session_state.current_waypoint_index += 1
+            st.session_state.current_position = st.session_state.current_route[st.session_state.current_waypoint_index]
+            st.session_state.battery_level = max(0, st.session_state.battery_level - random.uniform(0.3, 0.8))
+            add_log("航点到达", f"航点 {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)-1}", "info")
+            
+            # 检查是否完成
+            if st.session_state.current_waypoint_index >= len(st.session_state.current_route) - 1:
+                st.session_state.mission_active = False
+                add_log("任务完成", f"总时间: {format_time(get_elapsed())}", "success")
+            
+            # 刷新页面显示新位置
             st.rerun()
 
 # ====================== 页脚 ======================
