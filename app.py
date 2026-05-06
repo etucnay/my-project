@@ -36,7 +36,7 @@ if "heartbeat_running" not in st.session_state:
 if "flight_altitude" not in st.session_state:
     st.session_state.flight_altitude = 15.0
 if "safety_radius" not in st.session_state:
-    st.session_state.safety_radius = 15.0
+    st.session_state.safety_radius = 10.0
 if "current_route" not in st.session_state:
     st.session_state.current_route = []
 if "map_center" not in st.session_state:
@@ -98,7 +98,7 @@ def load_data():
         st.session_state.start_point = tuple(data.get("start_point", (32.2345, 118.7492)))
         st.session_state.end_point = tuple(data.get("end_point", (32.2337, 118.7496)))
         st.session_state.flight_altitude = data.get("flight_altitude", 15.0)
-        st.session_state.safety_radius = data.get("safety_radius", 15.0)
+        st.session_state.safety_radius = data.get("safety_radius", 10.0)
         st.session_state.route_mode = data.get("route_mode", "best")
 
 load_data()
@@ -166,211 +166,181 @@ def get_polygon_center(polygon):
     lngs = [p[1] for p in polygon]
     return sum(lats)/len(lats), sum(lngs)/len(lngs)
 
-# ====================== 核心路径规划算法 ======================
-def find_gap_between_obstacles(obs1_bounds, obs2_bounds):
-    """找到两个障碍物之间的间隙"""
-    # 获取两个障碍物的边界
-    min_lat1, max_lat1, min_lng1, max_lng1 = obs1_bounds
-    min_lat2, max_lat2, min_lng2, max_lng2 = obs2_bounds
-    
-    # 检查是否在同一水平线上
-    lat_overlap = (min_lat1 <= max_lat2 and max_lat1 >= min_lat2)
-    
-    if lat_overlap:
-        # 水平方向有重叠，检查左右间隙
-        if max_lng1 < min_lng2:
-            # 障碍物1在左，障碍物2在右，间隙在中间
-            gap_center_lng = (max_lng1 + min_lng2) / 2
-            gap_center_lat = (min_lat1 + max_lat1) / 2
-            return (gap_center_lat, gap_center_lng)
-        elif max_lng2 < min_lng1:
-            # 障碍物2在左，障碍物1在右
-            gap_center_lng = (max_lng2 + min_lng1) / 2
-            gap_center_lat = (min_lat1 + max_lat1) / 2
-            return (gap_center_lat, gap_center_lng)
-    
-    # 垂直方向检查
-    lng_overlap = (min_lng1 <= max_lng2 and max_lng1 >= min_lng2)
-    
-    if lng_overlap:
-        if max_lat1 < min_lat2:
-            gap_center_lat = (max_lat1 + min_lat2) / 2
-            gap_center_lng = (min_lng1 + max_lng1) / 2
-            return (gap_center_lat, gap_center_lng)
-        elif max_lat2 < min_lat1:
-            gap_center_lat = (max_lat2 + min_lat1) / 2
-            gap_center_lng = (min_lng1 + max_lng1) / 2
-            return (gap_center_lat, gap_center_lng)
-    
-    return None
-
-def get_obstacle_corner_points(polygon, safety_radius):
-    """获取障碍物的四个角点（带安全距离）"""
+def get_safe_bypass_points(polygon, safety_radius):
+    """获取障碍物周围的安全绕行点"""
     min_lat, max_lat, min_lng, max_lng = get_polygon_bounds(polygon)
-    center_lat, center_lng = get_polygon_center(polygon)
+    center_lat = (min_lat + max_lat) / 2
+    center_lng = (min_lng + max_lng) / 2
     
-    # 计算偏移量
-    offset_meters = safety_radius
+    # 计算偏移量（米转度）- 确保安全距离
+    offset_meters = safety_radius * 1.5
     offset_lat = offset_meters / 111320
     offset_lng = offset_meters / (111320 * math.cos(math.radians(center_lat)))
     
-    # 四个角点（向外扩展）
-    corners = [
-        (min_lat - offset_lat, min_lng - offset_lng),  # 左上
-        (min_lat - offset_lat, max_lng + offset_lng),  # 右上
-        (max_lat + offset_lat, min_lng - offset_lng),  # 左下
-        (max_lat + offset_lat, max_lng + offset_lng),  # 右下
-        (center_lat, min_lng - offset_lng * 2),  # 左中
-        (center_lat, max_lng + offset_lng * 2),  # 右中
-        (min_lat - offset_lat * 2, center_lng),  # 上中
-        (max_lat + offset_lat * 2, center_lng),  # 下中
-    ]
+    # 生成12个方向的绕行点，确保完全绕开
+    points = []
     
-    return corners
+    # 主要方向
+    points.append((min_lat - offset_lat, center_lng))  # 上
+    points.append((max_lat + offset_lat, center_lng))  # 下
+    points.append((center_lat, min_lng - offset_lng))  # 左
+    points.append((center_lat, max_lng + offset_lng))  # 右
+    
+    # 对角线方向
+    points.append((min_lat - offset_lat, min_lng - offset_lng))  # 左上
+    points.append((min_lat - offset_lat, max_lng + offset_lng))  # 右上
+    points.append((max_lat + offset_lat, min_lng - offset_lng))  # 左下
+    points.append((max_lat + offset_lat, max_lng + offset_lng))  # 右下
+    
+    # 额外安全点
+    points.append((min_lat - offset_lat * 2, center_lng))  # 上远
+    points.append((max_lat + offset_lat * 2, center_lng))  # 下远
+    points.append((center_lat, min_lng - offset_lng * 2))  # 左远
+    points.append((center_lat, max_lng + offset_lng * 2))  # 右远
+    
+    return points
 
-def find_path_through_gaps(start, end, obstacles, flight_altitude, safety_radius):
-    """寻找从障碍物之间穿过的路径"""
-    
-    # 收集需要绕行的障碍物
-    high_obstacles = []
+def is_path_safe(start, end, obstacles, flight_altitude):
+    """检查路径是否安全（完全不碰到红色障碍物）"""
     for obs in obstacles:
-        if obs.get("height", 0) >= flight_altitude:
-            high_obstacles.append(obs)
+        obs_height = obs.get("height", 0)
+        if obs_height >= flight_altitude:
+            polygon = obs.get("polygon", [])
+            if polygon and line_intersects_polygon(start, end, polygon):
+                return False
+    return True
+
+def find_safe_waypoints(start, end, obstacles, flight_altitude, safety_radius):
+    """找到安全的绕行路径"""
+    
+    # 收集需要绕行的红色障碍物
+    high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= flight_altitude]
     
     if not high_obstacles:
         return [start, end]
     
-    # 检查是否可以直线飞行
-    can_direct = True
-    for obs in high_obstacles:
-        if line_intersects_polygon(start, end, obs["polygon"]):
-            can_direct = False
-            break
-    
-    if can_direct:
+    # 检查直线是否安全
+    if is_path_safe(start, end, high_obstacles, flight_altitude):
         return [start, end]
     
-    # 收集所有可能的路径点
-    all_waypoints = [start]
-    current = start
-    
-    # 按顺序处理阻挡的障碍物
-    max_iterations = 15
-    
-    for _ in range(max_iterations):
-        # 检查是否可以直接到达终点
-        can_reach = True
-        for obs in high_obstacles:
-            if line_intersects_polygon(current, end, obs["polygon"]):
-                can_reach = False
-                break
-        
-        if can_reach:
-            all_waypoints.append(end)
-            break
-        
-        # 找到阻挡的障碍物
-        blocking_obs = None
-        for obs in high_obstacles:
-            if line_intersects_polygon(current, end, obs["polygon"]):
-                blocking_obs = obs
-                break
-        
-        if blocking_obs:
-            polygon = blocking_obs["polygon"]
-            bounds = get_polygon_bounds(polygon)
-            
-            # 尝试从两侧绕过
-            # 计算左右两侧的绕行点
-            corner_points = get_obstacle_corner_points(polygon, safety_radius)
-            
-            # 评估每个绕行点
-            best_point = None
-            best_score = float('inf')
-            
-            for point in corner_points:
-                # 检查这个点是否与其他障碍物相交
-                is_valid = True
-                for obs in high_obstacles:
-                    if obs != blocking_obs:
-                        if point_in_polygon(point, obs["polygon"]):
-                            is_valid = False
-                            break
-                
-                if is_valid:
-                    # 计算从当前点到绕行点，再到终点的距离
-                    dist1 = calculate_distance(current, point)
-                    dist2 = calculate_distance(point, end)
-                    score = dist1 + dist2
-                    
-                    if score < best_score:
-                        best_score = score
-                        best_point = point
-            
-            if best_point:
-                all_waypoints.append(best_point)
-                current = best_point
-            else:
-                # 如果找不到合适的绕行点，直接去终点
-                all_waypoints.append(end)
-                break
-            
-            # 从列表中移除已处理的障碍物
-            high_obstacles.remove(blocking_obs)
-        else:
-            all_waypoints.append(end)
-            break
-    
-    # 优化路径：移除不必要的中间点
-    optimized = [all_waypoints[0]]
-    i = 0
-    
-    while i < len(all_waypoints) - 1:
-        # 尝试跳过中间的点
-        for j in range(len(all_waypoints) - 1, i, -1):
-            if j > i + 1:
-                can_skip = True
-                for obs in st.session_state.obstacles:
-                    if obs.get("height", 0) >= flight_altitude:
-                        if line_intersects_polygon(all_waypoints[i], all_waypoints[j], obs["polygon"]):
-                            can_skip = False
-                            break
-                
-                if can_skip:
-                    optimized.append(all_waypoints[j])
-                    i = j
-                    break
-        else:
-            optimized.append(all_waypoints[i + 1])
-            i += 1
-    
-    return optimized
-
-def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
-    """强制向左绕行"""
+    # 构建路径
     waypoints = [start]
     current = start
+    remaining_obstacles = high_obstacles.copy()
+    max_iterations = 20
     
-    for _ in range(10):
-        # 检查是否可以直接到达终点
-        can_reach = True
-        for obs in obstacles:
-            if obs.get("height", 0) >= flight_altitude:
-                if line_intersects_polygon(current, end, obs["polygon"]):
-                    can_reach = False
-                    break
-        
-        if can_reach:
+    for _ in range(max_iterations):
+        # 检查是否能直接到达终点
+        if is_path_safe(current, end, remaining_obstacles, flight_altitude):
             waypoints.append(end)
             break
         
-        # 找到第一个阻挡的障碍物
+        # 找到阻挡的障碍物
         blocking = None
-        for obs in obstacles:
-            if obs.get("height", 0) >= flight_altitude:
-                if line_intersects_polygon(current, end, obs["polygon"]):
+        for obs in remaining_obstacles:
+            obs_height = obs.get("height", 0)
+            if obs_height >= flight_altitude:
+                polygon = obs.get("polygon", [])
+                if polygon and line_intersects_polygon(current, end, polygon):
                     blocking = obs
                     break
+        
+        if blocking:
+            polygon = blocking["polygon"]
+            # 获取安全绕行点
+            bypass_points = get_safe_bypass_points(polygon, safety_radius)
+            
+            # 找到最佳绕行点
+            best_point = None
+            best_score = float('inf')
+            
+            for point in bypass_points:
+                # 检查这个点本身是否在红色障碍物内
+                is_point_safe = True
+                for obs in high_obstacles:
+                    if point_in_polygon(point, obs["polygon"]):
+                        is_point_safe = False
+                        break
+                
+                if not is_point_safe:
+                    continue
+                
+                # 检查从当前点到绕行点是否安全
+                if not is_path_safe(current, point, high_obstacles, flight_altitude):
+                    continue
+                
+                # 计算分数（距离优先）
+                dist_to_point = calculate_distance(current, point)
+                dist_to_end = calculate_distance(point, end)
+                score = dist_to_point + dist_to_end
+                
+                if score < best_score:
+                    best_score = score
+                    best_point = point
+            
+            if best_point:
+                waypoints.append(best_point)
+                current = best_point
+            else:
+                # 如果找不到合适的绕行点，使用默认方向
+                bounds = get_polygon_bounds(polygon)
+                center_lat = (bounds[0] + bounds[1]) / 2
+                offset_meters = safety_radius * 2
+                offset_lng = offset_meters / (111320 * math.cos(math.radians(center_lat)))
+                
+                # 默认从右侧绕过
+                right_point = (center_lat, bounds[3] + offset_lng)
+                waypoints.append(right_point)
+                current = right_point
+            
+            # 移除已处理的障碍物
+            remaining_obstacles.remove(blocking)
+        else:
+            waypoints.append(end)
+            break
+    
+    # 简化路径
+    simplified = [waypoints[0]]
+    i = 0
+    
+    while i < len(waypoints) - 1:
+        # 尝试跳过中间的点
+        for j in range(len(waypoints) - 1, i, -1):
+            if j > i + 1:
+                if is_path_safe(waypoints[i], waypoints[j], high_obstacles, flight_altitude):
+                    simplified.append(waypoints[j])
+                    i = j
+                    break
+        else:
+            simplified.append(waypoints[i + 1])
+            i += 1
+    
+    return simplified
+
+def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
+    """强制向左绕行"""
+    high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= flight_altitude]
+    
+    if not high_obstacles:
+        return [start, end]
+    
+    if is_path_safe(start, end, high_obstacles, flight_altitude):
+        return [start, end]
+    
+    waypoints = [start]
+    current = start
+    remaining_obstacles = high_obstacles.copy()
+    
+    for _ in range(15):
+        if is_path_safe(current, end, remaining_obstacles, flight_altitude):
+            waypoints.append(end)
+            break
+        
+        blocking = None
+        for obs in remaining_obstacles:
+            if line_intersects_polygon(current, end, obs["polygon"]):
+                blocking = obs
+                break
         
         if blocking:
             polygon = blocking["polygon"]
@@ -378,14 +348,13 @@ def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
             min_lng = bounds[2]
             center_lat = (bounds[0] + bounds[1]) / 2
             
-            # 计算向左的偏移
             offset_meters = safety_radius * 2
             offset_lng = offset_meters / (111320 * math.cos(math.radians(center_lat)))
             
-            # 左侧绕行点
             left_point = (center_lat, min_lng - offset_lng)
             waypoints.append(left_point)
             current = left_point
+            remaining_obstacles.remove(blocking)
         else:
             waypoints.append(end)
             break
@@ -394,29 +363,28 @@ def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
 
 def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
     """强制向右绕行"""
+    high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= flight_altitude]
+    
+    if not high_obstacles:
+        return [start, end]
+    
+    if is_path_safe(start, end, high_obstacles, flight_altitude):
+        return [start, end]
+    
     waypoints = [start]
     current = start
+    remaining_obstacles = high_obstacles.copy()
     
-    for _ in range(10):
-        # 检查是否可以直接到达终点
-        can_reach = True
-        for obs in obstacles:
-            if obs.get("height", 0) >= flight_altitude:
-                if line_intersects_polygon(current, end, obs["polygon"]):
-                    can_reach = False
-                    break
-        
-        if can_reach:
+    for _ in range(15):
+        if is_path_safe(current, end, remaining_obstacles, flight_altitude):
             waypoints.append(end)
             break
         
-        # 找到第一个阻挡的障碍物
         blocking = None
-        for obs in obstacles:
-            if obs.get("height", 0) >= flight_altitude:
-                if line_intersects_polygon(current, end, obs["polygon"]):
-                    blocking = obs
-                    break
+        for obs in remaining_obstacles:
+            if line_intersects_polygon(current, end, obs["polygon"]):
+                blocking = obs
+                break
         
         if blocking:
             polygon = blocking["polygon"]
@@ -424,14 +392,13 @@ def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
             max_lng = bounds[3]
             center_lat = (bounds[0] + bounds[1]) / 2
             
-            # 计算向右的偏移
             offset_meters = safety_radius * 2
             offset_lng = offset_meters / (111320 * math.cos(math.radians(center_lat)))
             
-            # 右侧绕行点
             right_point = (center_lat, max_lng + offset_lng)
             waypoints.append(right_point)
             current = right_point
+            remaining_obstacles.remove(blocking)
         else:
             waypoints.append(end)
             break
@@ -448,7 +415,7 @@ def plan_route():
     mode = st.session_state.route_mode
     
     if mode == "best":
-        route = find_path_through_gaps(start, end, obstacles, altitude, safety_radius)
+        route = find_safe_waypoints(start, end, obstacles, altitude, safety_radius)
     elif mode == "left":
         route = plan_route_left(start, end, obstacles, altitude, safety_radius)
     else:
@@ -611,7 +578,7 @@ def create_map(show_flight=True, key_suffix=""):
         if polygon:
             if height >= st.session_state.flight_altitude:
                 color = "#ff0000"
-                fill_opacity = 0.3
+                fill_opacity = 0.4
             else:
                 color = "#00aa00"
                 fill_opacity = 0.2
@@ -623,7 +590,7 @@ def create_map(show_flight=True, key_suffix=""):
                 fill=True,
                 fill_color=color,
                 fill_opacity=fill_opacity,
-                popup=f"{name}\n高度: {height}m"
+                popup=f"{name}\n高度: {height}m {'⚠️需要绕行' if height >= st.session_state.flight_altitude else '✅可飞越'}"
             ).add_to(m)
     
     if st.session_state.current_route:
@@ -633,7 +600,7 @@ def create_map(show_flight=True, key_suffix=""):
             locations=st.session_state.current_route,
             color=route_color,
             weight=4,
-            opacity=0.8
+            opacity=0.9
         ).add_to(m)
         
         if show_flight and st.session_state.current_waypoint_index > 0:
@@ -652,7 +619,7 @@ def create_map(show_flight=True, key_suffix=""):
             elif i == len(st.session_state.current_route) - 1:
                 color = "green"
             else:
-                color = "blue"
+                color = "orange"
             
             if show_flight and i < st.session_state.current_waypoint_index:
                 color = "lightgreen"
@@ -807,7 +774,7 @@ with tab1:
             st.session_state.current_route = []
             save_data()
         
-        st.info("💡 智能穿行模式会自动寻找障碍物之间的空隙")
+        st.info("💡 智能穿行模式会自动寻找障碍物之间的安全通道，完全不触碰红色障碍物")
         
         st.divider()
         
@@ -887,9 +854,9 @@ with tab1:
                     height = obs.get('height', 0)
                     name = obs.get('name', '未知')
                     if height >= st.session_state.flight_altitude:
-                        st.markdown(f"**🔴 {name}** | {height}m")
+                        st.markdown(f"**🔴 {name}** | {height}m (需绕行)")
                     else:
-                        st.markdown(f"**🟢 {name}** | {height}m")
+                        st.markdown(f"**🟢 {name}** | {height}m (可飞越)")
                 with col_b:
                     if st.button("🗑️", key=f"del_{i}"):
                         st.session_state.obstacles.pop(i)
@@ -1118,4 +1085,4 @@ if st.session_state.heartbeat_running:
 
 # ====================== 页脚 ======================
 st.markdown("---")
-st.markdown("🚁 无人机航线规划与飞行监控系统 | 智能穿行模式会自动寻找障碍物之间的空隙")
+st.markdown("🚁 无人机航线规划与飞行监控系统 | 智能穿行模式会从障碍物之间安全穿过，完全不触碰红色障碍物")
