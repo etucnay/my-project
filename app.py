@@ -63,6 +63,8 @@ if "flight_log" not in st.session_state:
     st.session_state.flight_log = []
 if "current_position" not in st.session_state:
     st.session_state.current_position = None
+if "last_auto_time" not in st.session_state:
+    st.session_state.last_auto_time = 0
 
 # ====================== 通信链路状态 ======================
 if "gcs_status" not in st.session_state:
@@ -287,140 +289,84 @@ def find_path_between_obstacles(start, end, obstacles, flight_altitude, safety_r
     
     return simplified
 
-# ====================== 强制向左绕行 ======================
 def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
-    """强制向左绕行 - 完全避开所有红色障碍物"""
     high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= flight_altitude]
     
     if not high_obstacles:
         return [start, end]
     
-    # 检查直线是否安全
     if is_path_safe(start, end, high_obstacles, flight_altitude):
         return [start, end]
     
     waypoints = [start]
     current = start
+    remaining = high_obstacles.copy()
     
     for _ in range(20):
-        if is_path_safe(current, end, high_obstacles, flight_altitude):
+        if is_path_safe(current, end, remaining, flight_altitude):
             waypoints.append(end)
             break
         
-        # 找到阻挡的障碍物
         blocking = None
-        for obs in high_obstacles:
+        for obs in remaining:
             if line_intersects_polygon(current, end, obs["polygon"]):
                 blocking = obs
                 break
         
         if blocking:
-            polygon = blocking["polygon"]
-            bounds = get_polygon_bounds(polygon)
-            min_lng = bounds[2]
-            max_lng = bounds[3]
-            min_lat, max_lat = bounds[0], bounds[1]
+            bounds = get_polygon_bounds(blocking["polygon"])
+            min_lat, max_lat, min_lng, max_lng = bounds
             center_lat = (min_lat + max_lat) / 2
             
-            # 计算向左偏移（米转度）
             offset_meters = safety_radius * 2.5
             offset_lng = offset_meters / (111320 * math.cos(math.radians(center_lat)))
             
-            # 左侧绕行点 - 比最左边更左
             left_point = (center_lat, min_lng - offset_lng)
-            
-            # 确保绕行点不会进入其他障碍物
-            is_safe = True
-            for obs in high_obstacles:
-                if obs != blocking:
-                    if point_in_polygon(left_point, obs["polygon"]):
-                        is_safe = False
-                        break
-                    if line_intersects_polygon(current, left_point, obs["polygon"]):
-                        is_safe = False
-                        break
-            
-            if is_safe:
-                waypoints.append(left_point)
-                current = left_point
-            else:
-                # 如果左侧不行，尝试更左
-                left_point2 = (center_lat, min_lng - offset_lng * 2)
-                waypoints.append(left_point2)
-                current = left_point2
-            
-            # 从列表中移除已处理的障碍物
-            high_obstacles.remove(blocking)
+            waypoints.append(left_point)
+            current = left_point
+            remaining.remove(blocking)
         else:
             waypoints.append(end)
             break
     
     return waypoints
 
-# ====================== 强制向右绕行 ======================
 def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
-    """强制向右绕行 - 完全避开所有红色障碍物"""
     high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= flight_altitude]
     
     if not high_obstacles:
         return [start, end]
     
-    # 检查直线是否安全
     if is_path_safe(start, end, high_obstacles, flight_altitude):
         return [start, end]
     
     waypoints = [start]
     current = start
+    remaining = high_obstacles.copy()
     
     for _ in range(20):
-        if is_path_safe(current, end, high_obstacles, flight_altitude):
+        if is_path_safe(current, end, remaining, flight_altitude):
             waypoints.append(end)
             break
         
-        # 找到阻挡的障碍物
         blocking = None
-        for obs in high_obstacles:
+        for obs in remaining:
             if line_intersects_polygon(current, end, obs["polygon"]):
                 blocking = obs
                 break
         
         if blocking:
-            polygon = blocking["polygon"]
-            bounds = get_polygon_bounds(polygon)
-            min_lng = bounds[2]
-            max_lng = bounds[3]
-            min_lat, max_lat = bounds[0], bounds[1]
+            bounds = get_polygon_bounds(blocking["polygon"])
+            min_lat, max_lat, min_lng, max_lng = bounds
             center_lat = (min_lat + max_lat) / 2
             
-            # 计算向右偏移（米转度）
             offset_meters = safety_radius * 2.5
             offset_lng = offset_meters / (111320 * math.cos(math.radians(center_lat)))
             
-            # 右侧绕行点 - 比最右边更右
             right_point = (center_lat, max_lng + offset_lng)
-            
-            # 确保绕行点不会进入其他障碍物
-            is_safe = True
-            for obs in high_obstacles:
-                if obs != blocking:
-                    if point_in_polygon(right_point, obs["polygon"]):
-                        is_safe = False
-                        break
-                    if line_intersects_polygon(current, right_point, obs["polygon"]):
-                        is_safe = False
-                        break
-            
-            if is_safe:
-                waypoints.append(right_point)
-                current = right_point
-            else:
-                # 如果右侧不行，尝试更右
-                right_point2 = (center_lat, max_lng + offset_lng * 2)
-                waypoints.append(right_point2)
-                current = right_point2
-            
-            # 从列表中移除已处理的障碍物
-            high_obstacles.remove(blocking)
+            waypoints.append(right_point)
+            current = right_point
+            remaining.remove(blocking)
         else:
             waypoints.append(end)
             break
@@ -428,61 +374,58 @@ def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
     return waypoints
 
 def plan_route():
-    """规划航线主函数"""
     start = st.session_state.start_point
     end = st.session_state.end_point
     obstacles = st.session_state.obstacles
     altitude = st.session_state.flight_altitude
-    safety_radius = st.session_state.safety_radius
+    safety = st.session_state.safety_radius
     mode = st.session_state.route_mode
     
     if mode == "best":
-        route = find_path_between_obstacles(start, end, obstacles, altitude, safety_radius)
+        route = find_path_between_obstacles(start, end, obstacles, altitude, safety)
     elif mode == "left":
-        route = plan_route_left(start, end, obstacles, altitude, safety_radius)
+        route = plan_route_left(start, end, obstacles, altitude, safety)
     else:
-        route = plan_route_right(start, end, obstacles, altitude, safety_radius)
+        route = plan_route_right(start, end, obstacles, altitude, safety)
     
     st.session_state.current_route = route
     st.session_state.current_waypoint_index = 0
     st.session_state.current_position = start
 
-# ====================== 飞行监控函数 ======================
-def format_time(seconds):
-    minutes = int(seconds // 60)
-    secs = int(seconds % 60)
-    return f"{minutes:02d}:{secs:02d}"
-
-def get_elapsed_time():
-    if st.session_state.mission_start_time:
-        return (datetime.now() - st.session_state.mission_start_time).total_seconds()
-    return 0
-
-def get_estimated_arrival_time():
-    if not st.session_state.current_route or st.session_state.current_waypoint_index >= len(st.session_state.current_route):
-        return 0
-    
-    remaining_dist = 0
-    for i in range(st.session_state.current_waypoint_index, len(st.session_state.current_route) - 1):
-        remaining_dist += calculate_distance(st.session_state.current_route[i], st.session_state.current_route[i+1])
-    
-    return remaining_dist / st.session_state.flight_speed if st.session_state.flight_speed > 0 else 0
-
+# ====================== 辅助计算函数 ======================
 def calculate_total_distance(route):
+    if not route:
+        return 0
     total = 0
     for i in range(len(route) - 1):
         total += calculate_distance(route[i], route[i+1])
     return total
 
 def calculate_remaining_distance(route, current_index):
-    if current_index >= len(route) - 1:
+    if not route or current_index >= len(route) - 1:
         return 0
     remaining = 0
     for i in range(current_index, len(route) - 1):
         remaining += calculate_distance(route[i], route[i+1])
     return remaining
 
-def add_flight_log(action, details, level="info"):
+# ====================== 飞行函数 ======================
+def format_time(seconds):
+    return f"{int(seconds//60):02d}:{int(seconds%60):02d}"
+
+def get_elapsed():
+    if st.session_state.mission_start_time:
+        return (datetime.now() - st.session_state.mission_start_time).total_seconds()
+    return 0
+
+def get_remaining_distance():
+    return calculate_remaining_distance(st.session_state.current_route, st.session_state.current_waypoint_index)
+
+def get_eta():
+    remaining = get_remaining_distance()
+    return remaining / st.session_state.flight_speed if st.session_state.flight_speed > 0 else 0
+
+def add_log(action, details, level="info"):
     st.session_state.flight_log.insert(0, {
         "time": datetime.now().strftime("%H:%M:%S"),
         "action": action,
@@ -503,16 +446,17 @@ def start_mission():
     st.session_state.mission_start_time = datetime.now()
     st.session_state.current_position = st.session_state.current_route[0]
     st.session_state.battery_level = 100
-    
-    add_flight_log("任务开始", f"航线共 {len(st.session_state.current_route)-1} 个航段", "success")
+    st.session_state.last_auto_time = time.time()
+    add_log("任务开始", f"航线共 {len(st.session_state.current_route)-1} 个航段", "success")
 
 def pause_mission():
     st.session_state.mission_paused = True
-    add_flight_log("任务暂停", "", "warning")
+    add_log("任务暂停", "", "warning")
 
 def resume_mission():
     st.session_state.mission_paused = False
-    add_flight_log("任务恢复", "", "success")
+    st.session_state.last_auto_time = time.time()
+    add_log("任务恢复", "", "success")
 
 def stop_mission():
     st.session_state.mission_active = False
@@ -520,29 +464,35 @@ def stop_mission():
     st.session_state.current_waypoint_index = 0
     st.session_state.mission_start_time = None
     st.session_state.current_position = st.session_state.current_route[0] if st.session_state.current_route else None
-    add_flight_log("任务停止", "", "error")
+    add_log("任务停止", "", "error")
 
 def reset_mission():
     stop_mission()
     st.session_state.current_waypoint_index = 0
     st.session_state.current_position = st.session_state.current_route[0] if st.session_state.current_route else None
     st.session_state.battery_level = 100
-    add_flight_log("任务重置", "", "info")
+    add_log("任务重置", "", "info")
 
-# ====================== 自动飞行 ======================
+# ====================== 自动飞行（逐点移动，每次刷新只前进一个） ======================
 if st.session_state.mission_active and not st.session_state.mission_paused:
-    if st.session_state.current_waypoint_index < len(st.session_state.current_route) - 1:
-        time.sleep(1.5)
-        st.session_state.current_waypoint_index += 1
-        st.session_state.current_position = st.session_state.current_route[st.session_state.current_waypoint_index]
-        st.session_state.battery_level = max(0, st.session_state.battery_level - random.uniform(0.5, 1.0))
-        add_flight_log("航点到达", f"航点 {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)-1}", "info")
+    current_time = time.time()
+    
+    if st.session_state.last_auto_time == 0:
+        st.session_state.last_auto_time = current_time
+    elif current_time - st.session_state.last_auto_time >= 1.5:
+        st.session_state.last_auto_time = current_time
         
-        if st.session_state.current_waypoint_index >= len(st.session_state.current_route) - 1:
-            st.session_state.mission_active = False
-            add_flight_log("任务完成", f"总飞行时间: {format_time(get_elapsed_time())}", "success")
-        
-        st.rerun()
+        if st.session_state.current_waypoint_index < len(st.session_state.current_route) - 1:
+            st.session_state.current_waypoint_index += 1
+            st.session_state.current_position = st.session_state.current_route[st.session_state.current_waypoint_index]
+            st.session_state.battery_level = max(0, st.session_state.battery_level - random.uniform(0.3, 0.8))
+            add_log("航点到达", f"航点 {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)-1}", "info")
+            
+            if st.session_state.current_waypoint_index >= len(st.session_state.current_route) - 1:
+                st.session_state.mission_active = False
+                add_log("任务完成", f"总时间: {format_time(get_elapsed())}", "success")
+            
+            st.rerun()
 
 # ====================== 创建地图 ======================
 def create_map(show_flight=True):
@@ -954,17 +904,14 @@ with tab2:
         st.metric("飞行速度", f"{st.session_state.flight_speed} m/s")
     
     with col_stat3:
-        st.metric("已用时间", format_time(get_elapsed_time()))
+        st.metric("已用时间", format_time(get_elapsed()))
     
     with col_stat4:
-        if st.session_state.current_route:
-            remaining_dist = calculate_remaining_distance(st.session_state.current_route, st.session_state.current_waypoint_index)
-        else:
-            remaining_dist = 0
-        st.metric("剩余距离", f"{remaining_dist:.0f} m")
+        remaining = get_remaining_distance()
+        st.metric("剩余距离", f"{remaining:.0f} m")
     
     with col_stat5:
-        st.metric("预计到达", format_time(get_estimated_arrival_time()))
+        st.metric("预计到达", format_time(get_eta()))
     
     with col_stat6:
         battery = st.session_state.battery_level
@@ -1011,7 +958,7 @@ with tab2:
         st.progress(progress, text=f"航点进度: {current_wp}/{total_wp}")
         
         if st.session_state.mission_active and not st.session_state.mission_paused:
-            remaining_time = get_estimated_arrival_time()
+            remaining_time = get_eta()
             st.caption(f"预计剩余时间: {format_time(remaining_time)}")
 
 # ====================== 标签页3 ======================
@@ -1057,9 +1004,9 @@ with tab3:
                 f"{st.session_state.safety_radius} m",
                 {"best": "智能穿行", "left": "强制向左", "right": "强制向右"}[st.session_state.route_mode],
                 f"{st.session_state.battery_level:.1f}%",
-                format_time(get_elapsed_time()),
-                f"{calculate_remaining_distance(st.session_state.current_route, st.session_state.current_waypoint_index):.0f} m",
-                format_time(get_estimated_arrival_time())
+                format_time(get_elapsed()),
+                f"{get_remaining_distance():.0f} m",
+                format_time(get_eta())
             ]
         }
         
@@ -1122,4 +1069,4 @@ if st.session_state.heartbeat_running:
 
 # ====================== 页脚 ======================
 st.markdown("---")
-st.markdown("🚁 无人机航线规划与飞行监控系统 | 智能穿行模式自动寻找安全通道 | 开始任务后自动每1.5秒前进一个航点")
+st.markdown("🚁 无人机航线规划与飞行监控系统 | 开始任务后自动每1.5秒前进一个航点")
