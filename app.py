@@ -9,7 +9,6 @@ import pandas as pd
 import math
 import random
 import time
-import threading
 
 # ====================== 页面配置 ======================
 st.set_page_config(
@@ -64,6 +63,8 @@ if "flight_log" not in st.session_state:
     st.session_state.flight_log = []
 if "current_position" not in st.session_state:
     st.session_state.current_position = None
+if "last_auto_time" not in st.session_state:
+    st.session_state.last_auto_time = 0
 
 # ====================== 通信链路状态 ======================
 if "gcs_status" not in st.session_state:
@@ -171,7 +172,6 @@ def is_path_safe(start, end, obstacles, flight_altitude):
 
 # ====================== 路径规划 ======================
 def get_bypass_points_around_obstacle(polygon, safety_radius):
-    """获取障碍物周围的绕行点"""
     min_lat, max_lat, min_lng, max_lng = get_polygon_bounds(polygon)
     center_lat = (min_lat + max_lat) / 2
     center_lng = (min_lng + max_lng) / 2
@@ -181,15 +181,13 @@ def get_bypass_points_around_obstacle(polygon, safety_radius):
     offset_lng = offset_meters / (111320 * math.cos(math.radians(center_lat)))
     
     points = []
-    # 上、下、左、右四个方向
-    points.append((min_lat - offset_lat, center_lng))   # 上
-    points.append((max_lat + offset_lat, center_lng))   # 下
-    points.append((center_lat, min_lng - offset_lng))   # 左
-    points.append((center_lat, max_lng + offset_lng))   # 右
+    points.append((min_lat - offset_lat, center_lng))  # 上
+    points.append((max_lat + offset_lat, center_lng))  # 下
+    points.append((center_lat, min_lng - offset_lng))  # 左
+    points.append((center_lat, max_lng + offset_lng))  # 右
     return points
 
 def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
-    """智能穿行 - 使用图搜索找最短路径"""
     high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= flight_altitude]
     
     if not high_obstacles:
@@ -198,18 +196,15 @@ def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
     if is_path_safe(start, end, high_obstacles, flight_altitude):
         return [start, end]
     
-    # 收集所有关键点
     nodes = [start, end]
     for obs in high_obstacles:
         nodes.extend(get_bypass_points_around_obstacle(obs["polygon"], safety_radius))
     
-    # 去重
     unique_nodes = []
     for n in nodes:
         if n not in unique_nodes:
             unique_nodes.append(n)
     
-    # 构建图
     n = len(unique_nodes)
     adj = [[] for _ in range(n)]
     for i in range(n):
@@ -221,7 +216,6 @@ def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
                 adj[i].append((j, dist))
                 adj[j].append((i, dist))
     
-    # Dijkstra算法
     start_idx = unique_nodes.index(start)
     end_idx = unique_nodes.index(end)
     
@@ -249,7 +243,6 @@ def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
     if dist[end_idx] == INF:
         return [start, end]
     
-    # 重建路径
     path = []
     cur = end_idx
     while cur != -1:
@@ -259,7 +252,6 @@ def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
     return path
 
 def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
-    """强制向左绕行"""
     high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= flight_altitude]
     
     if not high_obstacles:
@@ -277,7 +269,6 @@ def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
             waypoints.append(end)
             break
         
-        # 找到第一个阻挡的障碍物
         blocking = None
         for obs in remaining:
             if line_intersects_polygon(current, end, obs["polygon"]):
@@ -289,11 +280,9 @@ def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
             min_lat, max_lat, min_lng, max_lng = bounds
             center_lat = (min_lat + max_lat) / 2
             
-            # 安全偏移
             offset_meters = safety_radius * 2.5
             offset_lng = offset_meters / (111320 * math.cos(math.radians(center_lat)))
             
-            # 从左侧绕过
             left_point = (center_lat, min_lng - offset_lng)
             waypoints.append(left_point)
             current = left_point
@@ -305,7 +294,6 @@ def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
     return waypoints
 
 def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
-    """强制向右绕行"""
     high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= flight_altitude]
     
     if not high_obstacles:
@@ -323,7 +311,6 @@ def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
             waypoints.append(end)
             break
         
-        # 找到第一个阻挡的障碍物
         blocking = None
         for obs in remaining:
             if line_intersects_polygon(current, end, obs["polygon"]):
@@ -335,11 +322,9 @@ def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
             min_lat, max_lat, min_lng, max_lng = bounds
             center_lat = (min_lat + max_lat) / 2
             
-            # 安全偏移
             offset_meters = safety_radius * 2.5
             offset_lng = offset_meters / (111320 * math.cos(math.radians(center_lat)))
             
-            # 从右侧绕过
             right_point = (center_lat, max_lng + offset_lng)
             waypoints.append(right_point)
             current = right_point
@@ -401,7 +386,6 @@ def add_log(action, details, level="info"):
         st.session_state.flight_log = st.session_state.flight_log[:50]
 
 def advance_one_waypoint():
-    """前进一个航点"""
     if not st.session_state.current_route:
         return False
     
@@ -432,6 +416,7 @@ def start_mission():
     st.session_state.mission_start_time = datetime.now()
     st.session_state.current_position = st.session_state.current_route[0]
     st.session_state.battery_level = 100
+    st.session_state.last_auto_time = time.time()
     add_log("任务开始", f"航线共 {len(st.session_state.current_route)-1} 个航段", "success")
 
 def pause_mission():
@@ -440,6 +425,7 @@ def pause_mission():
 
 def resume_mission():
     st.session_state.mission_paused = False
+    st.session_state.last_auto_time = time.time()
     add_log("任务恢复", "", "success")
 
 def stop_mission():
@@ -457,17 +443,13 @@ def reset_mission():
     st.session_state.battery_level = 100
     add_log("任务重置", "", "info")
 
-# ====================== 自动飞行线程 ======================
-def auto_flight_worker():
-    while True:
-        time.sleep(1.2)
-        if st.session_state.mission_active and not st.session_state.mission_paused:
-            advance_one_waypoint()
-
-if "flight_thread_started" not in st.session_state:
-    st.session_state.flight_thread_started = True
-    thread = threading.Thread(target=auto_flight_worker, daemon=True)
-    thread.start()
+# ====================== 自动飞行控制 ======================
+if st.session_state.mission_active and not st.session_state.mission_paused:
+    current_time = time.time()
+    if current_time - st.session_state.last_auto_time >= 1.2:
+        st.session_state.last_auto_time = current_time
+        advance_one_waypoint()
+        st.rerun()
 
 # ====================== 创建地图 ======================
 def create_map(show_flight=True):
@@ -478,7 +460,6 @@ def create_map(show_flight=True):
         attr="高德地图"
     )
     
-    # 绘图工具 - 用于添加障碍物
     if not st.session_state.mission_active and not show_flight:
         draw = Draw(
             draw_options={
@@ -496,21 +477,18 @@ def create_map(show_flight=True):
         )
         draw.add_to(m)
     
-    # 起点
     folium.Marker(
         location=st.session_state.start_point,
         popup="🚁 起点",
         icon=folium.Icon(color="red", icon="play", prefix="fa")
     ).add_to(m)
     
-    # 终点
     folium.Marker(
         location=st.session_state.end_point,
         popup="🎯 终点",
         icon=folium.Icon(color="green", icon="flag-checkered", prefix="fa")
     ).add_to(m)
     
-    # 障碍物
     for i, obs in enumerate(st.session_state.obstacles):
         polygon = obs.get("polygon", [])
         height = obs.get("height", 10)
@@ -529,10 +507,9 @@ def create_map(show_flight=True):
                 fill=True,
                 fill_color=color,
                 fill_opacity=fill_opacity,
-                popup=f"{name}\n高度: {height}m {'⚠️需绕行' if height >= st.session_state.flight_altitude else '✅可飞越'}"
+                popup=f"{name}\n高度: {height}m"
             ).add_to(m)
     
-    # 航线
     if st.session_state.current_route:
         folium.PolyLine(
             locations=st.session_state.current_route,
@@ -541,7 +518,6 @@ def create_map(show_flight=True):
             opacity=0.9
         ).add_to(m)
         
-        # 已完成航段
         if show_flight and st.session_state.current_waypoint_index > 0:
             completed = st.session_state.current_route[:st.session_state.current_waypoint_index + 1]
             if len(completed) > 1:
@@ -552,7 +528,6 @@ def create_map(show_flight=True):
                     opacity=0.9
                 ).add_to(m)
         
-        # 航点标记
         for i, point in enumerate(st.session_state.current_route):
             if i == 0:
                 color = "red"
@@ -571,7 +546,6 @@ def create_map(show_flight=True):
                 popup=f"航点 {i+1}"
             ).add_to(m)
     
-    # 无人机当前位置
     if show_flight and st.session_state.current_position:
         folium.Marker(
             location=st.session_state.current_position,
@@ -640,7 +614,6 @@ with tab1:
         m = create_map(show_flight=False)
         output = st_folium(m, width=850, height=550, returned_objects=["last_clicked", "all_drawings"], key="planning_map")
         
-        # 处理点击设置起点/终点
         if output and output.get("last_clicked"):
             clicked = output["last_clicked"]
             if clicked and "lat" in clicked:
@@ -660,7 +633,6 @@ with tab1:
                     st.toast("✅ 终点已设置", icon="✅")
                     st.rerun()
         
-        # 处理绘图工具绘制的多边形
         if output and output.get("all_drawings"):
             drawings = output["all_drawings"]
             if len(drawings) > 0:
@@ -670,7 +642,6 @@ with tab1:
                     polygon_points = [[c[1], c[0]] for c in coords]
                     st.session_state.pending_polygon = polygon_points
         
-        # 显示添加障碍物表单
         if st.session_state.pending_polygon:
             with st.container():
                 st.markdown("### ➕ 添加新障碍物")
@@ -710,7 +681,7 @@ with tab1:
         mode = st.radio(
             "选择绕行策略",
             options=["best", "left", "right"],
-            format_func=lambda x: {"best": "🌟 智能穿行（从中间穿过）", "left": "⬅️ 强制向左", "right": "➡️ 强制向右"}[x],
+            format_func=lambda x: {"best": "🌟 智能穿行", "left": "⬅️ 强制向左", "right": "➡️ 强制向右"}[x],
             index=["best", "left", "right"].index(st.session_state.route_mode)
         )
         if mode != st.session_state.route_mode:
@@ -819,7 +790,6 @@ with tab2:
     
     st.divider()
     
-    # 实时状态
     st.subheader("📊 飞行实时状态")
     col_s1, col_s2, col_s3, col_s4, col_s5, col_s6 = st.columns(6)
     
@@ -841,14 +811,12 @@ with tab2:
     
     st.divider()
     
-    # 实时地图
     st.subheader("🗺️ 实时飞行地图")
     flight_map = create_map(show_flight=True)
     st_folium(flight_map, width=900, height=450, returned_objects=[], key="monitor_map")
     
     st.divider()
     
-    # 通信链路
     st.subheader("📡 通信链路拓扑与数据流")
     col_l1, col_l2, col_l3 = st.columns(3)
     with col_l1:
@@ -861,7 +829,6 @@ with tab2:
     
     st.divider()
     
-    # 进度
     st.subheader("📈 任务进度")
     if st.session_state.current_route:
         total = len(st.session_state.current_route) - 1
@@ -912,7 +879,6 @@ with tab3:
         
         st.divider()
         
-        # 心跳
         st.subheader("💓 心跳检测")
         col_h1, col_h2 = st.columns(2)
         with col_h1:
@@ -960,4 +926,4 @@ if st.session_state.heartbeat_running:
 
 # ====================== 页脚 ======================
 st.markdown("---")
-st.markdown("🚁 无人机航线规划与飞行监控系统 | 智能穿行从障碍物之间穿过 | 开始任务后自动每1.2秒飞行")
+st.markdown("🚁 无人机航线规划与飞行监控系统 | 开始任务后自动每1.2秒飞行一个航点")
