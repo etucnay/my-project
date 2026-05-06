@@ -436,22 +436,14 @@ function stopAutoClick() {
 }
 
 const observer = new MutationObserver(() => {
-    const startBtn = document.querySelector('button[kind="primary"]');
-    if (startBtn && startBtn.innerText === '▶️ 开始任务') {
-        stopAutoClick();
-    }
     const pauseBtn = Array.from(document.querySelectorAll('button')).find(btn => btn.innerText === '⏸️ 暂停');
     const resumeBtn = Array.from(document.querySelectorAll('button')).find(btn => btn.innerText === '▶️ 恢复');
-    const stopBtn = Array.from(document.querySelectorAll('button')).find(btn => btn.innerText === '⏹️ 停止');
     
     if (pauseBtn && !pauseBtn.disabled) {
         startAutoClick();
     }
     if (resumeBtn && !resumeBtn.disabled) {
         stopAutoClick();
-    }
-    if (stopBtn && stopBtn.disabled === false) {
-        // 手动点停止时清除
     }
 });
 observer.observe(document.body, { childList: true, subtree: true });
@@ -826,7 +818,8 @@ with tab2:
     if st.session_state.current_route:
         total = len(st.session_state.current_route) - 1
         current = st.session_state.current_waypoint_index
-        progress = current / total if total > 0 else 0        st.progress(progress, text=f"航点进度: {current}/{total}")
+        progress = current / total if total > 0 else 0
+        st.progress(progress, text=f"航点进度: {current}/{total}")
 
 # ====================== 标签页3 ======================
 with tab3:
