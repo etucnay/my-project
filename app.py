@@ -8,7 +8,6 @@ from datetime import datetime
 import pandas as pd
 import math
 import random
-import time
 
 # ====================== 页面配置 ======================
 st.set_page_config(
@@ -63,8 +62,6 @@ if "flight_log" not in st.session_state:
     st.session_state.flight_log = []
 if "current_position" not in st.session_state:
     st.session_state.current_position = None
-if "last_auto_time" not in st.session_state:
-    st.session_state.last_auto_time = 0
 
 # ====================== 通信链路状态 ======================
 if "gcs_status" not in st.session_state:
@@ -365,6 +362,19 @@ def add_log(action, details, level="info"):
     if len(st.session_state.flight_log) > 50:
         st.session_state.flight_log = st.session_state.flight_log[:50]
 
+def advance_waypoint():
+    if st.session_state.mission_active and not st.session_state.mission_paused:
+        if st.session_state.current_waypoint_index < len(st.session_state.current_route) - 1:
+            st.session_state.current_waypoint_index += 1
+            st.session_state.current_position = st.session_state.current_route[st.session_state.current_waypoint_index]
+            st.session_state.battery_level = max(0, st.session_state.battery_level - random.uniform(0.3, 0.8))
+            add_log("航点到达", f"航点 {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)-1}", "info")
+            if st.session_state.current_waypoint_index >= len(st.session_state.current_route) - 1:
+                st.session_state.mission_active = False
+                add_log("任务完成", f"总时间: {format_time(get_elapsed())}", "success")
+            return True
+    return False
+
 def start_mission():
     if not st.session_state.current_route:
         st.toast("❌ 请先规划航线", icon="❌")
@@ -375,7 +385,6 @@ def start_mission():
     st.session_state.mission_start_time = datetime.now()
     st.session_state.current_position = st.session_state.current_route[0]
     st.session_state.battery_level = 100
-    st.session_state.last_auto_time = time.time()
     add_log("任务开始", f"航线共 {len(st.session_state.current_route)-1} 个航段", "success")
 
 def pause_mission():
@@ -384,7 +393,6 @@ def pause_mission():
 
 def resume_mission():
     st.session_state.mission_paused = False
-    st.session_state.last_auto_time = time.time()
     add_log("任务恢复", "", "success")
 
 def stop_mission():
@@ -402,22 +410,53 @@ def reset_mission():
     st.session_state.battery_level = 100
     add_log("任务重置", "", "info")
 
-# ====================== 自动飞行 - 每1.5秒前进一个航点 ======================
-if st.session_state.mission_active and not st.session_state.mission_paused:
-    current_time = time.time()
-    if st.session_state.last_auto_time == 0:
-        st.session_state.last_auto_time = current_time
-    elif current_time - st.session_state.last_auto_time >= 1.5:
-        st.session_state.last_auto_time = current_time
-        if st.session_state.current_waypoint_index < len(st.session_state.current_route) - 1:
-            st.session_state.current_waypoint_index += 1
-            st.session_state.current_position = st.session_state.current_route[st.session_state.current_waypoint_index]
-            st.session_state.battery_level = max(0, st.session_state.battery_level - random.uniform(0.3, 0.8))
-            add_log("航点到达", f"航点 {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)-1}", "info")
-            if st.session_state.current_waypoint_index >= len(st.session_state.current_route) - 1:
-                st.session_state.mission_active = False
-                add_log("任务完成", f"总时间: {format_time(get_elapsed())}", "success")
-            st.rerun()
+# ====================== JS自动点击脚本 ======================
+auto_click_js = """
+<script>
+let autoInterval = null;
+
+function startAutoClick() {
+    if (autoInterval) clearInterval(autoInterval);
+    autoInterval = setInterval(() => {
+        const buttons = document.querySelectorAll('button');
+        for (let btn of buttons) {
+            if (btn.innerText === '➡️ 前进') {
+                btn.click();
+                break;
+            }
+        }
+    }, 1500);
+}
+
+function stopAutoClick() {
+    if (autoInterval) {
+        clearInterval(autoInterval);
+        autoInterval = null;
+    }
+}
+
+const observer = new MutationObserver(() => {
+    const startBtn = document.querySelector('button[kind="primary"]');
+    if (startBtn && startBtn.innerText === '▶️ 开始任务') {
+        stopAutoClick();
+    }
+    const pauseBtn = Array.from(document.querySelectorAll('button')).find(btn => btn.innerText === '⏸️ 暂停');
+    const resumeBtn = Array.from(document.querySelectorAll('button')).find(btn => btn.innerText === '▶️ 恢复');
+    const stopBtn = Array.from(document.querySelectorAll('button')).find(btn => btn.innerText === '⏹️ 停止');
+    
+    if (pauseBtn && !pauseBtn.disabled) {
+        startAutoClick();
+    }
+    if (resumeBtn && !resumeBtn.disabled) {
+        stopAutoClick();
+    }
+    if (stopBtn && stopBtn.disabled === false) {
+        // 手动点停止时清除
+    }
+});
+observer.observe(document.body, { childList: true, subtree: true });
+</script>
+"""
 
 # ====================== 创建地图 ======================
 def create_map(show_flight=True):
@@ -530,6 +569,9 @@ def create_map(show_flight=True):
         ).add_to(m)
     
     return m
+
+# ====================== 注入JS ======================
+st.components.v1.html(auto_click_js, height=0)
 
 # ====================== 页面布局 ======================
 tab1, tab2, tab3 = st.tabs(["🗺️ 地图与航线规划", "📡 飞行任务监控", "📊 飞行日志与遥测"])
@@ -731,6 +773,11 @@ with tab2:
         else:
             st.button("✈️ 飞行中", use_container_width=True, disabled=True)
     
+    # 前进按钮（被JS自动点击）
+    col_adv = st.columns([1, 2, 1])
+    with col_adv[1]:
+        st.button("➡️ 前进", key="advance", use_container_width=True, on_click=advance_waypoint)
+    
     st.divider()
     
     # 实时状态
@@ -779,8 +826,7 @@ with tab2:
     if st.session_state.current_route:
         total = len(st.session_state.current_route) - 1
         current = st.session_state.current_waypoint_index
-        progress = current / total if total > 0 else 0
-        st.progress(progress, text=f"航点进度: {current}/{total}")
+        progress = current / total if total > 0 else 0        st.progress(progress, text=f"航点进度: {current}/{total}")
 
 # ====================== 标签页3 ======================
 with tab3:
@@ -869,4 +915,4 @@ if st.session_state.heartbeat_running:
 
 # ====================== 页脚 ======================
 st.markdown("---")
-st.markdown("🚁 无人机航线规划与飞行监控系统 | 点击「开始任务」后自动每1.5秒飞一个航点")
+st.markdown("🚁 无人机航线规划与飞行监控系统 | 开始任务后自动每1.5秒前进一个航点")
