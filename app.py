@@ -390,33 +390,25 @@ def reset_mission():
     st.session_state.battery_level = 100
     add_flight_log("任务重置", "", "info")
 
-# ====================== 自动飞行推进（每1.5秒） ======================
+# ====================== 自动飞行推进 ======================
 if st.session_state.mission_active and not st.session_state.mission_paused:
     current_time = time.time()
     if current_time - st.session_state.last_tick >= 1.5:
         st.session_state.last_tick = current_time
         
-        # 前进到下一个航点
         if st.session_state.current_waypoint_index < len(st.session_state.current_route) - 1:
             st.session_state.current_waypoint_index += 1
             st.session_state.current_position = st.session_state.current_route[st.session_state.current_waypoint_index]
-            
-            # 模拟电量消耗
             st.session_state.battery_level = max(0, st.session_state.battery_level - random.uniform(0.5, 1.0))
-            
-            # 记录航点到达
             add_flight_log("航点到达", f"航点 {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)-1}", "info")
             
-            # 检查是否完成
             if st.session_state.current_waypoint_index >= len(st.session_state.current_route) - 1:
                 st.session_state.mission_active = False
                 add_flight_log("任务完成", f"总飞行时间: {format_time(get_elapsed_time())}", "success")
             
-            # 刷新页面显示新位置
             st.rerun()
         else:
             st.session_state.mission_active = False
-            add_flight_log("任务完成", f"总飞行时间: {format_time(get_elapsed_time())}", "success")
 
 # ====================== 创建地图 ======================
 def create_map(show_flight=True):
@@ -427,8 +419,7 @@ def create_map(show_flight=True):
         attr="高德地图"
     )
     
-    # 绘图工具（仅当未飞行时显示）
-    if not st.session_state.mission_active:
+    if not st.session_state.mission_active and not show_flight:
         draw = Draw(
             draw_options={
                 "polygon": {
@@ -445,21 +436,18 @@ def create_map(show_flight=True):
         )
         draw.add_to(m)
     
-    # 起点
     folium.Marker(
         location=st.session_state.start_point,
         popup="🚁 起点",
         icon=folium.Icon(color="red", icon="play", prefix="fa")
     ).add_to(m)
     
-    # 终点
     folium.Marker(
         location=st.session_state.end_point,
         popup="🎯 终点",
         icon=folium.Icon(color="green", icon="flag-checkered", prefix="fa")
     ).add_to(m)
     
-    # 障碍物
     for i, obs in enumerate(st.session_state.obstacles):
         polygon = obs.get("polygon", [])
         height = obs.get("height", 10)
@@ -483,9 +471,7 @@ def create_map(show_flight=True):
                 popup=f"{name}\n高度: {height}m"
             ).add_to(m)
     
-    # 航线
     if st.session_state.current_route:
-        # 完整航线（虚线）
         folium.PolyLine(
             locations=st.session_state.current_route,
             color="#00ff00",
@@ -494,7 +480,6 @@ def create_map(show_flight=True):
             dash_array='5, 5'
         ).add_to(m)
         
-        # 已完成航段（实线）
         if show_flight and st.session_state.current_waypoint_index > 0:
             completed = st.session_state.current_route[:st.session_state.current_waypoint_index + 1]
             if len(completed) > 1:
@@ -505,7 +490,6 @@ def create_map(show_flight=True):
                     opacity=0.9
                 ).add_to(m)
         
-        # 航点标记
         for i, point in enumerate(st.session_state.current_route):
             if i == 0:
                 color = "red"
@@ -526,7 +510,6 @@ def create_map(show_flight=True):
                 popup=f"航点 {i+1}"
             ).add_to(m)
     
-    # 无人机当前位置
     if show_flight and st.session_state.current_position:
         folium.Marker(
             location=st.session_state.current_position,
@@ -534,7 +517,6 @@ def create_map(show_flight=True):
             icon=folium.Icon(color="blue", icon="plane", prefix="fa")
         ).add_to(m)
         
-        # 添加飞行方向指示圆圈
         folium.Circle(
             location=st.session_state.current_position,
             radius=15,
@@ -544,7 +526,6 @@ def create_map(show_flight=True):
             fill_opacity=0.3
         ).add_to(m)
         
-        # 飞行方向线
         if st.session_state.current_waypoint_index < len(st.session_state.current_route) - 1:
             next_point = st.session_state.current_route[st.session_state.current_waypoint_index + 1]
             folium.PolyLine(
@@ -792,51 +773,51 @@ with tab1:
 with tab2:
     st.subheader("🎮 飞行任务控制")
     
+    # 控制按钮区域
     col_ctl1, col_ctl2, col_ctl3, col_ctl4, col_ctl5 = st.columns(5)
     with col_ctl1:
         if not st.session_state.mission_active:
-            if st.button("▶️ 开始任务", use_container_width=True, type="primary"):
+            if st.button("▶️ 开始任务", key="btn_start", use_container_width=True, type="primary"):
                 start_mission()
                 st.rerun()
         else:
-            st.button("✅ 执行中", use_container_width=True, disabled=True)
+            st.button("✅ 执行中", key="btn_flying", use_container_width=True, disabled=True)
     
     with col_ctl2:
         if st.session_state.mission_active and not st.session_state.mission_paused:
-            if st.button("⏸️ 暂停", use_container_width=True):
+            if st.button("⏸️ 暂停", key="btn_pause", use_container_width=True):
                 pause_mission()
                 st.rerun()
         elif st.session_state.mission_paused:
-            if st.button("▶️ 恢复", use_container_width=True):
+            if st.button("▶️ 恢复", key="btn_resume", use_container_width=True):
                 resume_mission()
                 st.rerun()
         else:
-            st.button("⏸️ 暂停", use_container_width=True, disabled=True)
+            st.button("⏸️ 暂停", key="btn_pause_disabled", use_container_width=True, disabled=True)
     
     with col_ctl3:
-        if st.button("⏹️ 停止", use_container_width=True):
+        if st.button("⏹️ 停止", key="btn_stop", use_container_width=True):
             stop_mission()
             st.rerun()
     
     with col_ctl4:
-        if st.button("🔄 重置", use_container_width=True):
+        if st.button("🔄 重置", key="btn_reset", use_container_width=True):
             reset_mission()
             st.rerun()
     
     with col_ctl5:
         if st.session_state.mission_paused:
-            st.button("⏸️ 已暂停", use_container_width=True, disabled=True)
+            st.button("⏸️ 已暂停", key="btn_status_paused", use_container_width=True, disabled=True)
         elif not st.session_state.mission_active:
-            st.button("⏹️ 未开始", use_container_width=True, disabled=True)
+            st.button("⏹️ 未开始", key="btn_status_idle", use_container_width=True, disabled=True)
         else:
-            st.button("✅ 执行中", use_container_width=True, disabled=True)
+            st.button("✅ 执行中", key="btn_status_flying", use_container_width=True, disabled=True)
     
     st.divider()
     
-    # 飞行实时状态表格（完全按照图片样式）
+    # 飞行实时状态表格
     st.subheader("📊 飞行实时状态")
     
-    # 飞行实时画面 - 任务执行监控表格
     col_stat1, col_stat2, col_stat3, col_stat4, col_stat5, col_stat6 = st.columns(6)
     
     with col_stat1:
@@ -875,32 +856,28 @@ with tab2:
     
     st.divider()
     
-    # 通信链路拓扑与数据流（完全按照图片样式）
+    # 通信链路拓扑与数据流
     st.subheader("📡 通信链路拓扑与数据流")
-    
-    # 使用三行显示，像图片一样 - 简洁列表
-    st.markdown("#### 通信链路状态")
     
     col_link1, col_link2, col_link3 = st.columns(3)
     
     with col_link1:
-        st.markdown(f"**GCS**")
-        st.markdown(f"🟢 {st.session_state.gcs_status}")
+        st.markdown("**GCS**")
+        st.markdown("🟢 在线")
     
     with col_link2:
-        st.markdown(f"**OBC**")
-        st.markdown(f"🟢 {st.session_state.obc_status}")
+        st.markdown("**OBC**")
+        st.markdown("🟢 在线")
     
     with col_link3:
-        st.markdown(f"**FCU**")
-        st.markdown(f"🟢 {st.session_state.fcu_status}")
+        st.markdown("**FCU**")
+        st.markdown("🟢 在线")
     
-    # 链路说明
-    st.caption("数据链路: GCS ↔ OBC ↔ FCU")
+    st.caption("🔗 数据链路: GCS ↔ OBC ↔ FCU")
     
     st.divider()
     
-    # 飞行进度条
+    # 任务进度
     st.subheader("📈 任务进度")
     
     if st.session_state.current_route:
@@ -968,7 +945,6 @@ with tab3:
         
         st.divider()
         
-        # 心跳检测
         st.subheader("💓 心跳检测")
         
         col_heart1, col_heart2 = st.columns(2)
