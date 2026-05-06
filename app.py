@@ -339,6 +339,14 @@ def calculate_total_distance(route):
         total += calculate_distance(route[i], route[i+1])
     return total
 
+def calculate_remaining_distance(route, current_index):
+    if current_index >= len(route) - 1:
+        return 0
+    remaining = 0
+    for i in range(current_index, len(route) - 1):
+        remaining += calculate_distance(route[i], route[i+1])
+    return remaining
+
 def add_flight_log(action, details, level="info"):
     st.session_state.flight_log.insert(0, {
         "time": datetime.now().strftime("%H:%M:%S"),
@@ -418,7 +426,6 @@ def stop_mission():
     add_flight_log("任务停止", "", "error")
 
 # ====================== 动画循环 ======================
-# 每隔1.2秒自动前进一个航点
 if st.session_state.mission_active and not st.session_state.mission_paused:
     current_time = time.time()
     if current_time - st.session_state.last_animation_time >= 1.2:
@@ -435,7 +442,7 @@ def create_map(show_flight=True):
         attr="高德地图"
     )
     
-    # 绘图工具
+    # 绘图工具（仅当未飞行时显示）
     if not st.session_state.mission_active:
         draw = Draw(
             draw_options={
@@ -528,7 +535,8 @@ def create_map(show_flight=True):
                 radius=5,
                 color=color,
                 fill=True,
-                fill_opacity=0.8
+                fill_opacity=0.8,
+                popup=f"航点 {i+1}"
             ).add_to(m)
     
     # 无人机当前位置
@@ -809,9 +817,7 @@ with tab2:
     
     with col_stat4:
         if st.session_state.current_route:
-            remaining_dist = 0
-            for i in range(st.session_state.current_waypoint_index, len(st.session_state.current_route) - 1):
-                remaining_dist += calculate_distance(st.session_state.current_route[i], st.session_state.current_route[i+1])
+            remaining_dist = calculate_remaining_distance(st.session_state.current_route, st.session_state.current_waypoint_index)
         else:
             remaining_dist = 0
         st.metric("剩余距离", f"{remaining_dist:.0f} m")
@@ -920,14 +926,38 @@ with tab3:
         
         df = pd.DataFrame(telemetry_table)
         st.dataframe(df, use_container_width=True, hide_index=True)
-
-def calculate_remaining_distance(route, current_index):
-    if current_index >= len(route) - 1:
-        return 0
-    remaining = 0
-    for i in range(current_index, len(route) - 1):
-        remaining += calculate_distance(route[i], route[i+1])
-    return remaining
+        
+        st.divider()
+        
+        # 心跳控制
+        st.subheader("💓 心跳检测")
+        
+        col_heart1, col_heart2 = st.columns(2)
+        with col_heart1:
+            if not st.session_state.heartbeat_running:
+                if st.button("▶️ 开始心跳", use_container_width=True):
+                    st.session_state.heartbeat_running = True
+                    st.rerun()
+            else:
+                if st.button("⏸️ 停止心跳", use_container_width=True):
+                    st.session_state.heartbeat_running = False
+                    st.rerun()
+        
+        with col_heart2:
+            if st.button("📡 发送心跳", use_container_width=True):
+                new_seq = len(st.session_state.heartbeat_history) + 1
+                st.session_state.heartbeat_history.append({
+                    "seq": new_seq,
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                    "status": "正常"
+                })
+                st.rerun()
+        
+        if st.session_state.heartbeat_history:
+            df_heart = pd.DataFrame(st.session_state.heartbeat_history[-10:])
+            st.dataframe(df_heart, use_container_width=True, hide_index=True)
+        else:
+            st.info("暂无心跳数据")
 
 # ====================== 自动心跳 ======================
 if st.session_state.heartbeat_running:
