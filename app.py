@@ -162,33 +162,130 @@ def get_polygon_center(polygon):
     lngs = [p[1] for p in polygon]
     return sum(lats)/len(lats), sum(lngs)/len(lngs)
 
-# ====================== 路径规划函数 ======================
-def is_path_safe(start, end, obstacles, flight_altitude):
+def point_to_segment_distance(point, seg_start, seg_end):
+    """计算点到线段的最短距离（米）"""
+    lat0, lng0 = point
+    lat1, lng1 = seg_start
+    lat2, lng2 = seg_end
+    
+    # 转换为米制坐标近似
+    center_lat = (lat0 + lat1 + lat2) / 3
+    meters_per_degree_lat = 111320
+    meters_per_degree_lng = 111320 * math.cos(math.radians(center_lat))
+    
+    # 转换到米制坐标
+    def to_meters(lat, lng):
+        x = (lng - center_lat) * meters_per_degree_lng
+        y = (lat - center_lat) * meters_per_degree_lat
+        return (x, y)
+    
+    p = to_meters(lat0, lng0)
+    a = to_meters(lat1, lng1)
+    b = to_meters(lat2, lng2)
+    
+    # 计算点到线段的最短距离
+    abx = b[0] - a[0]
+    aby = b[1] - a[1]
+    
+    if abx == 0 and aby == 0:
+        return math.sqrt((p[0] - a[0])**2 + (p[1] - a[1])**2)
+    
+    t = ((p[0] - a[0]) * abx + (p[1] - a[1]) * aby) / (abx*abx + aby*aby)
+    t = max(0, min(1, t))
+    
+    proj_x = a[0] + t * abx
+    proj_y = a[1] + t * aby
+    
+    return math.sqrt((p[0] - proj_x)**2 + (p[1] - proj_y)**2)
+
+def point_to_polygon_distance(point, polygon):
+    """计算点到多边形的最短距离（米）"""
+    min_dist = float('inf')
+    for i in range(len(polygon)):
+        p1 = polygon[i]
+        p2 = polygon[(i + 1) % len(polygon)]
+        dist = point_to_segment_distance(point, p1, p2)
+        min_dist = min(min_dist, dist)
+    
+    # 如果点在多边形内部，距离为负数
+    if point_in_polygon(point, polygon):
+        return -min_dist
+    
+    return min_dist
+
+def line_to_polygon_distance(line_start, line_end, polygon):
+    """计算线段到多边形的最短距离（米）"""
+    # 检查线段是否与多边形相交
+    if line_intersects_polygon(line_start, line_end, polygon):
+        return 0
+    
+    # 计算线段端点到多边形的最短距离
+    min_dist = float('inf')
+    min_dist = min(min_dist, point_to_polygon_distance(line_start, polygon))
+    min_dist = min(min_dist, point_to_polygon_distance(line_end, polygon))
+    
+    # 计算多边形各顶点到线段的最短距离
+    for vertex in polygon:
+        dist = point_to_segment_distance(vertex, line_start, line_end)
+        min_dist = min(min_dist, dist)
+    
+    return min_dist
+
+def is_path_safe_with_distance(start, end, obstacles, flight_altitude, safety_radius):
+    """检查路径是否安全（距离大于安全半径）"""
     for obs in obstacles:
         obs_height = obs.get("height", 0)
         if obs_height >= flight_altitude:
             polygon = obs.get("polygon", [])
-            if polygon and line_intersects_polygon(start, end, polygon):
-                return False
+            if polygon:
+                # 计算线段到障碍物的最短距离
+                dist = line_to_polygon_distance(start, end, polygon)
+                if dist < safety_radius:
+                    return False, dist
+    return True, float('inf')
+
+def is_point_safe(point, obstacles, flight_altitude, safety_radius):
+    """检查点是否安全"""
+    for obs in obstacles:
+        obs_height = obs.get("height", 0)
+        if obs_height >= flight_altitude:
+            polygon = obs.get("polygon", [])
+            if polygon:
+                dist = point_to_polygon_distance(point, polygon)
+                if dist < safety_radius:
+                    return False
     return True
 
+# ====================== 路径规划函数 ======================
 def get_bypass_points(polygon, safety_radius):
-    """获取障碍物周围的绕行点"""
+    """获取障碍物周围的安全绕行点"""
     min_lat, max_lat, min_lng, max_lng = get_polygon_bounds(polygon)
     center_lat = (min_lat + max_lat) / 2
     center_lng = (min_lng + max_lng) / 2
     
-    # 安全距离偏移（米转度）
-    offset_meters = safety_radius * 2
+    # 计算安全距离（米转度）- 使用更大的安全值确保完全避开
+    offset_meters = safety_radius * 1.5
     offset_lat = offset_meters / 111320
     offset_lng = offset_meters / (111320 * math.cos(math.radians(center_lat)))
     
     points = []
-    # 上、下、左、右四个方向
-    points.append((min_lat - offset_lat, center_lng))  # 上
-    points.append((max_lat + offset_lat, center_lng))  # 下
-    points.append((center_lat, min_lng - offset_lng))  # 左
-    points.append((center_lat, max_lng + offset_lng))  # 右
+    # 生成12个方向的绕行点
+    # 上
+    points.append((min_lat - offset_lat, center_lng))
+    # 下
+    points.append((max_lat + offset_lat, center_lng))
+    # 左
+    points.append((center_lat, min_lng - offset_lng))
+    # 右
+    points.append((center_lat, max_lng + offset_lng))
+    # 左上
+    points.append((min_lat - offset_lat, min_lng - offset_lng))
+    # 右上
+    points.append((min_lat - offset_lat, max_lng + offset_lng))
+    # 左下
+    points.append((max_lat + offset_lat, min_lng - offset_lng))
+    # 右下
+    points.append((max_lat + offset_lat, max_lng + offset_lng))
     
     return points
 
@@ -199,30 +296,34 @@ def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
     if not high_obstacles:
         return [start, end]
     
-    if is_path_safe(start, end, high_obstacles, flight_altitude):
+    # 检查直线是否安全（考虑距离）
+    safe, _ = is_path_safe_with_distance(start, end, high_obstacles, flight_altitude, safety_radius)
+    if safe:
         return [start, end]
     
     # 收集所有绕行点
-    all_bypass_points = []
+    all_bypass_points = [start, end]
     for obs in high_obstacles:
         points = get_bypass_points(obs["polygon"], safety_radius)
-        all_bypass_points.extend(points)
+        for p in points:
+            if is_point_safe(p, high_obstacles, flight_altitude, safety_radius):
+                all_bypass_points.append(p)
     
     # 去重
     unique_points = []
     for p in all_bypass_points:
         if p not in unique_points:
             unique_points.append(p)
-    unique_points.append(start)
-    unique_points.append(end)
     
     # 构建图
     graph = {}
     for i, p1 in enumerate(unique_points):
         graph[i] = []
         for j, p2 in enumerate(unique_points):
-            if i != j and is_path_safe(p1, p2, high_obstacles, flight_altitude):
-                graph[i].append((j, calculate_distance(p1, p2)))
+            if i != j:
+                safe, _ = is_path_safe_with_distance(p1, p2, high_obstacles, flight_altitude, safety_radius)
+                if safe:
+                    graph[i].append((j, calculate_distance(p1, p2)))
     
     # Dijkstra算法
     start_idx = unique_points.index(start)
@@ -251,7 +352,8 @@ def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
                     previous[neighbor] = min_idx
     
     if distances[end_idx] == float('inf'):
-        return [start, end]
+        # 如果没有找到路径，使用左侧绕行
+        return plan_route_left(start, end, obstacles, flight_altitude, safety_radius)
     
     # 重建路径
     path_indices = []
@@ -267,10 +369,12 @@ def plan_route_best(start, end, obstacles, flight_altitude, safety_radius):
     i = 0
     while i < len(path) - 1:
         for j in range(len(path) - 1, i, -1):
-            if j > i + 1 and is_path_safe(path[i], path[j], high_obstacles, flight_altitude):
-                simplified.append(path[j])
-                i = j
-                break
+            if j > i + 1:
+                safe, _ = is_path_safe_with_distance(path[i], path[j], high_obstacles, flight_altitude, safety_radius)
+                if safe:
+                    simplified.append(path[j])
+                    i = j
+                    break
         else:
             simplified.append(path[i + 1])
             i += 1
@@ -284,21 +388,25 @@ def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
     if not high_obstacles:
         return [start, end]
     
-    if is_path_safe(start, end, high_obstacles, flight_altitude):
+    safe, _ = is_path_safe_with_distance(start, end, high_obstacles, flight_altitude, safety_radius)
+    if safe:
         return [start, end]
     
     waypoints = [start]
     current = start
+    remaining_obstacles = high_obstacles.copy()
     
     for _ in range(15):
-        if is_path_safe(current, end, high_obstacles, flight_altitude):
+        safe, _ = is_path_safe_with_distance(current, end, remaining_obstacles, flight_altitude, safety_radius)
+        if safe:
             waypoints.append(end)
             break
         
         # 找到第一个阻挡的障碍物
         blocking = None
-        for obs in high_obstacles:
-            if line_intersects_polygon(current, end, obs["polygon"]):
+        for obs in remaining_obstacles:
+            polygon = obs["polygon"]
+            if line_intersects_polygon(current, end, polygon):
                 blocking = obs
                 break
         
@@ -309,15 +417,25 @@ def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
             min_lat, max_lat = bounds[0], bounds[1]
             center_lat = (min_lat + max_lat) / 2
             
-            # 向左偏移
-            offset_meters = safety_radius * 2
+            # 计算向左偏移（米转度）- 使用足够大的偏移确保完全避开
+            offset_meters = safety_radius * 2.5
             offset_lng = offset_meters / (111320 * math.cos(math.radians(center_lat)))
             
             # 左侧绕行点
-            left_point = (center_lat, min_lng - offset_lng)
-            waypoints.append(left_point)
-            current = left_point
-            high_obstacles.remove(blocking)
+            bypass_lng = min_lng - offset_lng
+            left_point = (center_lat, bypass_lng)
+            
+            # 验证点是否安全
+            if is_point_safe(left_point, remaining_obstacles, flight_altitude, safety_radius):
+                waypoints.append(left_point)
+                current = left_point
+            else:
+                # 如果不安全，继续向左
+                left_point2 = (center_lat, bypass_lng - offset_lng)
+                waypoints.append(left_point2)
+                current = left_point2
+            
+            remaining_obstacles.remove(blocking)
         else:
             waypoints.append(end)
             break
@@ -331,21 +449,25 @@ def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
     if not high_obstacles:
         return [start, end]
     
-    if is_path_safe(start, end, high_obstacles, flight_altitude):
+    safe, _ = is_path_safe_with_distance(start, end, high_obstacles, flight_altitude, safety_radius)
+    if safe:
         return [start, end]
     
     waypoints = [start]
     current = start
+    remaining_obstacles = high_obstacles.copy()
     
     for _ in range(15):
-        if is_path_safe(current, end, high_obstacles, flight_altitude):
+        safe, _ = is_path_safe_with_distance(current, end, remaining_obstacles, flight_altitude, safety_radius)
+        if safe:
             waypoints.append(end)
             break
         
         # 找到第一个阻挡的障碍物
         blocking = None
-        for obs in high_obstacles:
-            if line_intersects_polygon(current, end, obs["polygon"]):
+        for obs in remaining_obstacles:
+            polygon = obs["polygon"]
+            if line_intersects_polygon(current, end, polygon):
                 blocking = obs
                 break
         
@@ -356,15 +478,25 @@ def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
             min_lat, max_lat = bounds[0], bounds[1]
             center_lat = (min_lat + max_lat) / 2
             
-            # 向右偏移
-            offset_meters = safety_radius * 2
+            # 计算向右偏移（米转度）- 使用足够大的偏移确保完全避开
+            offset_meters = safety_radius * 2.5
             offset_lng = offset_meters / (111320 * math.cos(math.radians(center_lat)))
             
             # 右侧绕行点
-            right_point = (center_lat, max_lng + offset_lng)
-            waypoints.append(right_point)
-            current = right_point
-            high_obstacles.remove(blocking)
+            bypass_lng = max_lng + offset_lng
+            right_point = (center_lat, bypass_lng)
+            
+            # 验证点是否安全
+            if is_point_safe(right_point, remaining_obstacles, flight_altitude, safety_radius):
+                waypoints.append(right_point)
+                current = right_point
+            else:
+                # 如果不安全，继续向右
+                right_point2 = (center_lat, bypass_lng + offset_lng)
+                waypoints.append(right_point2)
+                current = right_point2
+            
+            remaining_obstacles.remove(blocking)
         else:
             waypoints.append(end)
             break
