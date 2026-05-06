@@ -290,7 +290,6 @@ def find_path_between_obstacles(start, end, obstacles, flight_altitude, safety_r
     return simplified
 
 def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
-    """强制向左绕行"""
     high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= flight_altitude]
     
     if not high_obstacles:
@@ -333,7 +332,6 @@ def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
     return waypoints
 
 def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
-    """强制向右绕行"""
     high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= flight_altitude]
     
     if not high_obstacles:
@@ -394,6 +392,25 @@ def plan_route():
     st.session_state.current_waypoint_index = 0
     st.session_state.current_position = start
 
+# ====================== 辅助计算函数 ======================
+def calculate_total_distance(route):
+    """计算航线总距离"""
+    if not route:
+        return 0
+    total = 0
+    for i in range(len(route) - 1):
+        total += calculate_distance(route[i], route[i+1])
+    return total
+
+def calculate_remaining_distance(route, current_index):
+    """计算剩余距离"""
+    if not route or current_index >= len(route) - 1:
+        return 0
+    remaining = 0
+    for i in range(current_index, len(route) - 1):
+        remaining += calculate_distance(route[i], route[i+1])
+    return remaining
+
 # ====================== 飞行函数 ======================
 def format_time(seconds):
     return f"{int(seconds//60):02d}:{int(seconds%60):02d}"
@@ -404,12 +421,7 @@ def get_elapsed():
     return 0
 
 def get_remaining_distance():
-    if not st.session_state.current_route or st.session_state.current_waypoint_index >= len(st.session_state.current_route):
-        return 0
-    remaining = 0
-    for i in range(st.session_state.current_waypoint_index, len(st.session_state.current_route)-1):
-        remaining += calculate_distance(st.session_state.current_route[i], st.session_state.current_route[i+1])
-    return remaining
+    return calculate_remaining_distance(st.session_state.current_route, st.session_state.current_waypoint_index)
 
 def get_eta():
     remaining = get_remaining_distance()
@@ -463,8 +475,7 @@ def reset_mission():
     st.session_state.battery_level = 100
     add_log("任务重置", "", "info")
 
-# ====================== 核心：自动飞行（逐点移动） ======================
-# 每1.5秒自动前进一个航点，每次刷新只前进一个
+# ====================== 自动飞行（逐点移动） ======================
 if st.session_state.mission_active and not st.session_state.mission_paused:
     current_time = time.time()
     if st.session_state.last_auto_time == 0:
@@ -473,18 +484,15 @@ if st.session_state.mission_active and not st.session_state.mission_paused:
         st.session_state.last_auto_time = current_time
         
         if st.session_state.current_waypoint_index < len(st.session_state.current_route) - 1:
-            # 前进一个航点
             st.session_state.current_waypoint_index += 1
             st.session_state.current_position = st.session_state.current_route[st.session_state.current_waypoint_index]
             st.session_state.battery_level = max(0, st.session_state.battery_level - random.uniform(0.3, 0.8))
             add_log("航点到达", f"航点 {st.session_state.current_waypoint_index}/{len(st.session_state.current_route)-1}", "info")
             
-            # 检查是否完成
             if st.session_state.current_waypoint_index >= len(st.session_state.current_route) - 1:
                 st.session_state.mission_active = False
                 add_log("任务完成", f"总时间: {format_time(get_elapsed())}", "success")
             
-            # 刷新页面显示新位置
             st.rerun()
 
 # ====================== 创建地图 ======================
@@ -900,11 +908,8 @@ with tab2:
         st.metric("已用时间", format_time(get_elapsed()))
     
     with col_stat4:
-        if st.session_state.current_route:
-            remaining_dist = calculate_remaining_distance(st.session_state.current_route, st.session_state.current_waypoint_index)
-        else:
-            remaining_dist = 0
-        st.metric("剩余距离", f"{remaining_dist:.0f} m")
+        remaining = get_remaining_distance()
+        st.metric("剩余距离", f"{remaining:.0f} m")
     
     with col_stat5:
         st.metric("预计到达", format_time(get_eta()))
@@ -1001,7 +1006,7 @@ with tab3:
                 {"best": "智能穿行", "left": "强制向左", "right": "强制向右"}[st.session_state.route_mode],
                 f"{st.session_state.battery_level:.1f}%",
                 format_time(get_elapsed()),
-                f"{calculate_remaining_distance(st.session_state.current_route, st.session_state.current_waypoint_index):.0f} m",
+                f"{get_remaining_distance():.0f} m",
                 format_time(get_eta())
             ]
         }
