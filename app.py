@@ -69,8 +69,8 @@ if "current_position" not in st.session_state:
     st.session_state.current_position = None
 if "telemetry_data" not in st.session_state:
     st.session_state.telemetry_data = []
-if "last_animation_time" not in st.session_state:
-    st.session_state.last_animation_time = 0
+if "simulation_running" not in st.session_state:
+    st.session_state.simulation_running = False
 
 # ====================== 通信链路状态 ======================
 if "gcs_status" not in st.session_state:
@@ -364,6 +364,7 @@ def advance_waypoint():
     
     if st.session_state.current_waypoint_index >= len(st.session_state.current_route):
         st.session_state.mission_active = False
+        st.session_state.simulation_running = False
         add_flight_log("任务完成", f"总飞行时间: {format_time(get_elapsed_time())}", "success")
         return False
     
@@ -388,6 +389,7 @@ def advance_waypoint():
     # 检查完成
     if st.session_state.current_waypoint_index >= len(st.session_state.current_route):
         st.session_state.mission_active = False
+        st.session_state.simulation_running = False
         add_flight_log("任务完成", f"总飞行时间: {format_time(get_elapsed_time())}", "success")
     
     return True
@@ -403,35 +405,33 @@ def start_mission():
     st.session_state.mission_start_time = datetime.now()
     st.session_state.current_position = st.session_state.current_route[0]
     st.session_state.battery_level = 100
-    st.session_state.last_animation_time = time.time()
+    st.session_state.simulation_running = True
     
     add_flight_log("任务开始", f"航线共 {len(st.session_state.current_route)} 个航点", "success")
     return True
 
 def pause_mission():
     st.session_state.mission_paused = True
+    st.session_state.simulation_running = False
     add_flight_log("任务暂停", "", "warning")
 
 def resume_mission():
     st.session_state.mission_paused = False
-    st.session_state.last_animation_time = time.time()
+    st.session_state.simulation_running = True
     add_flight_log("任务恢复", "", "success")
 
 def stop_mission():
     st.session_state.mission_active = False
     st.session_state.mission_paused = False
+    st.session_state.simulation_running = False
     st.session_state.current_waypoint_index = 0
     st.session_state.mission_start_time = None
     st.session_state.current_position = None
     add_flight_log("任务停止", "", "error")
 
-# ====================== 动画循环 ======================
-if st.session_state.mission_active and not st.session_state.mission_paused:
-    current_time = time.time()
-    if current_time - st.session_state.last_animation_time >= 1.2:
-        st.session_state.last_animation_time = current_time
-        advance_waypoint()
-        st.rerun()
+def reset_mission():
+    stop_mission()
+    add_flight_log("任务重置", "", "info")
 
 # ====================== 创建地图 ======================
 def create_map(show_flight=True):
@@ -764,17 +764,19 @@ with tab1:
 with tab2:
     st.subheader("🎮 飞行任务控制")
     
-    col_ctl1, col_ctl2, col_ctl3, col_ctl4 = st.columns(4)
+    col_ctl1, col_ctl2, col_ctl3, col_ctl4, col_ctl5 = st.columns(5)
     with col_ctl1:
-        if not st.session_state.mission_active:
+        if not st.session_state.simulation_running and not st.session_state.mission_active:
             if st.button("🚁 开始自主飞行", use_container_width=True, type="primary"):
                 start_mission()
                 st.rerun()
+        elif st.session_state.simulation_running:
+            st.button("✈️ 飞行中...", use_container_width=True, disabled=True)
         else:
-            st.button("✈️ 飞行中", use_container_width=True, disabled=True)
+            st.button("⏹️ 已停止", use_container_width=True, disabled=True)
     
     with col_ctl2:
-        if st.session_state.mission_active and not st.session_state.mission_paused:
+        if st.session_state.simulation_running and not st.session_state.mission_paused:
             if st.button("⏸️ 暂停", use_container_width=True):
                 pause_mission()
                 st.rerun()
@@ -792,8 +794,19 @@ with tab2:
     
     with col_ctl4:
         if st.button("🔄 重置", use_container_width=True):
-            stop_mission()
+            reset_mission()
             st.rerun()
+    
+    with col_ctl5:
+        if st.session_state.mission_active and not st.session_state.mission_paused:
+            status_text = "✅ 自主飞行中"
+        elif st.session_state.mission_paused:
+            status_text = "⏸️ 已暂停"
+        elif st.session_state.current_route:
+            status_text = "⏹️ 待命"
+        else:
+            status_text = "⚠️ 未规划"
+        st.button(status_text, use_container_width=True, disabled=True)
     
     st.divider()
     
@@ -846,7 +859,7 @@ with tab2:
         
         st.progress(progress, text=f"✈️ 航线进度: {current_wp}/{total_wp} 航点")
         
-        if st.session_state.mission_active and not st.session_state.mission_paused:
+        if st.session_state.simulation_running and not st.session_state.mission_paused:
             st.caption(f"⏱️ 预计剩余时间: {format_time(get_estimated_arrival_time())}")
     
     st.divider()
@@ -969,6 +982,7 @@ if st.session_state.heartbeat_running:
             "time": now.strftime("%H:%M:%S"),
             "status": "正常"
         })
+        time.sleep(0.3)
         st.rerun()
     else:
         last_time = datetime.strptime(st.session_state.heartbeat_history[-1]["time"], "%H:%M:%S")
@@ -978,7 +992,49 @@ if st.session_state.heartbeat_running:
                 "time": now.strftime("%H:%M:%S"),
                 "status": "正常"
             })
+            time.sleep(0.3)
             st.rerun()
+
+# ====================== 核心：真正的自动飞行循环 ======================
+# 这段代码必须在页面底部，使用 while 循环实现真正的连续动画
+if st.session_state.simulation_running and not st.session_state.mission_paused:
+    # 获取当前页面占位符
+    progress_placeholder = st.empty()
+    status_placeholder = st.empty()
+    
+    # 飞行循环 - 每1.2秒前进一个航点
+    for _ in range(len(st.session_state.current_route) - st.session_state.current_waypoint_index):
+        if not st.session_state.simulation_running or st.session_state.mission_paused:
+            break
+        
+        # 更新进度显示
+        with progress_placeholder.container():
+            total_wp = len(st.session_state.current_route)
+            current_wp = st.session_state.current_waypoint_index
+            progress = current_wp / total_wp if total_wp > 0 else 0
+            st.progress(progress, text=f"✈️ 航线进度: {current_wp}/{total_wp} 航点")
+            st.caption(f"⏱️ 预计剩余时间: {format_time(get_estimated_arrival_time())}")
+        
+        # 前进到下一个航点
+        advance_waypoint()
+        
+        # 刷新地图显示
+        st.rerun()
+        
+        # 等待1.2秒后再前进
+        time.sleep(1.2)
+        
+        # 检查是否完成
+        if st.session_state.current_waypoint_index >= len(st.session_state.current_route):
+            break
+    
+    # 飞行结束
+    if st.session_state.current_waypoint_index >= len(st.session_state.current_route):
+        st.session_state.simulation_running = False
+        st.session_state.mission_active = False
+        with status_placeholder:
+            st.success("🎉 任务完成！无人机已到达终点！")
+        time.sleep(2)
 
 # ====================== 页脚 ======================
 st.markdown("---")
