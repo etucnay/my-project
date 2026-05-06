@@ -8,6 +8,7 @@ from datetime import datetime
 import pandas as pd
 import math
 import random
+import time
 
 # ====================== 页面配置 ======================
 st.set_page_config(
@@ -288,6 +289,111 @@ def find_path_between_obstacles(start, end, obstacles, flight_altitude, safety_r
     
     return simplified
 
+# ====================== 新增：强制向左绕行 ======================
+def plan_route_left(start, end, obstacles, flight_altitude, safety_radius):
+    high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= flight_altitude]
+    if not high_obstacles:
+        return [start, end]
+    if is_path_safe(start, end, high_obstacles, flight_altitude):
+        return [start, end]
+
+    waypoints = [start]
+    current = start
+    remaining = high_obstacles.copy()
+
+    for _ in range(30):
+        if is_path_safe(current, end, remaining, flight_altitude):
+            waypoints.append(end)
+            break
+
+        # 找到第一个阻挡的障碍物
+        blocking = None
+        for obs in remaining:
+            if line_intersects_polygon(current, end, obs["polygon"]):
+                blocking = obs
+                break
+        if not blocking:
+            waypoints.append(end)
+            break
+
+        bounds = get_polygon_bounds(blocking["polygon"])
+        min_lat, max_lat, min_lng, max_lng = bounds
+        center_lat = (min_lat + max_lat) / 2
+
+        # 向左偏移（安全半径 × 5 保证完全避开）
+        offset_meters = safety_radius * 5.0
+        offset_lng = offset_meters / (111320 * math.cos(math.radians(center_lat)))
+        left_point = (center_lat, min_lng - offset_lng)
+
+        # 二次验证：确保绕行点和路径安全
+        safe = True
+        for obs in remaining:
+            if point_in_polygon(left_point, obs["polygon"]):
+                safe = False
+                break
+            if line_intersects_polygon(current, left_point, obs["polygon"]):
+                safe = False
+                break
+        if not safe:
+            left_point = (center_lat, min_lng - offset_lng * 2)
+
+        waypoints.append(left_point)
+        current = left_point
+        remaining.remove(blocking)
+
+    return waypoints
+
+# ====================== 新增：强制向右绕行 ======================
+def plan_route_right(start, end, obstacles, flight_altitude, safety_radius):
+    high_obstacles = [obs for obs in obstacles if obs.get("height", 0) >= flight_altitude]
+    if not high_obstacles:
+        return [start, end]
+    if is_path_safe(start, end, high_obstacles, flight_altitude):
+        return [start, end]
+
+    waypoints = [start]
+    current = start
+    remaining = high_obstacles.copy()
+
+    for _ in range(30):
+        if is_path_safe(current, end, remaining, flight_altitude):
+            waypoints.append(end)
+            break
+
+        blocking = None
+        for obs in remaining:
+            if line_intersects_polygon(current, end, obs["polygon"]):
+                blocking = obs
+                break
+        if not blocking:
+            waypoints.append(end)
+            break
+
+        bounds = get_polygon_bounds(blocking["polygon"])
+        min_lat, max_lat, min_lng, max_lng = bounds
+        center_lat = (min_lat + max_lat) / 2
+
+        offset_meters = safety_radius * 5.0
+        offset_lng = offset_meters / (111320 * math.cos(math.radians(center_lat)))
+        right_point = (center_lat, max_lng + offset_lng)
+
+        safe = True
+        for obs in remaining:
+            if point_in_polygon(right_point, obs["polygon"]):
+                safe = False
+                break
+            if line_intersects_polygon(current, right_point, obs["polygon"]):
+                safe = False
+                break
+        if not safe:
+            right_point = (center_lat, max_lng + offset_lng * 2)
+
+        waypoints.append(right_point)
+        current = right_point
+        remaining.remove(blocking)
+
+    return waypoints
+
 def plan_route():
     start = st.session_state.start_point
     end = st.session_state.end_point
@@ -298,8 +404,10 @@ def plan_route():
     
     if mode == "best":
         route = find_path_between_obstacles(start, end, obstacles, altitude, safety_radius)
-    else:
-        route = [start, end]
+    elif mode == "left":
+        route = plan_route_left(start, end, obstacles, altitude, safety_radius)
+    else:  # right
+        route = plan_route_right(start, end, obstacles, altitude, safety_radius)
     
     st.session_state.current_route = route
     st.session_state.current_waypoint_index = 0
@@ -996,7 +1104,6 @@ if st.session_state.heartbeat_running:
 
 # ====================== 核心：自动飞行循环 ======================
 if st.session_state.mission_active and not st.session_state.mission_paused:
-    import time
     # 等待1.5秒后自动前进
     time.sleep(1.5)
     advance_waypoint_auto()
